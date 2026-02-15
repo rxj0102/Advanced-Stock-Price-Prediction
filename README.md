@@ -27,9 +27,8 @@ Ensembles	Voting Regressor, Stacking, Blending, Weighted Average
 Advanced	LightGBM, CatBoost, Polynomial Regression, Neural Networks
 Support Vector	SVR
 
-================================================================================
+
 COMPREHENSIVE MODEL COMPARISON
-================================================================================
 Models sorted by R² Score:
 
                Model   RMSE    MAE       R²   MAPE Directional_Acc
@@ -44,11 +43,9 @@ Neural Network (MLP) $33.81 $31.77  -1.8131 20.89%          49.48%
              XGBoost $52.37 $48.53  -5.7477 30.65%          51.96%
                  SVR $73.73 $65.67 -12.3763 40.97%          49.48%
 
-================================================================================
 🏆 BEST PERFORMING MODEL: Lasso Regression
    R² Score: 0.9118
    RMSE: $5.99
-================================================================================
 
 📊 Cross-Stock Performance
 
