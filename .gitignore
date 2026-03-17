@@ -24,7 +24,8 @@ ENV/
 *.h5
 *.pkl
 *.joblib
-data/
+# Ignore top-level data/ directory but NOT src/*/data/ packages
+/data/
 
 # OS
 .DS_Store
@@ -40,8 +41,8 @@ Thumbs.db
 *.log
 logs/
 
-# Model artifacts
-models/
+# Model artifacts (top-level only, not src subpackages)
+/models/
 *.pt
 *.pth
 *.onnx

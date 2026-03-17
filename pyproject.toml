@@ -1,0 +1,100 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name        = "stock-prediction"
+version     = "0.1.0"
+description = "Multi-model stock price prediction with technical indicators"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.8"
+
+keywords = [
+    "stock prediction",
+    "machine learning",
+    "technical indicators",
+    "quantitative finance",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.21",
+    "pandas>=1.3",
+    "scipy>=1.7",
+    "yfinance>=0.2",
+    "scikit-learn>=1.0",
+    "matplotlib>=3.4",
+    "seaborn>=0.11",
+    "tqdm>=4.62",
+]
+
+[project.optional-dependencies]
+boosting = [
+    "xgboost>=1.5",
+    "lightgbm>=3.3",
+    "catboost>=1.0",
+]
+deep = [
+    "tensorflow>=2.8",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+]
+all = [
+    "stock-prediction[boosting,deep,dev]",
+]
+
+# ---------------------------------------------------------------------------
+# Package discovery
+# ---------------------------------------------------------------------------
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths       = ["tests"]
+addopts         = "-v --tb=short"
+filterwarnings  = ["ignore::UserWarning", "ignore::FutureWarning"]
+
+# ---------------------------------------------------------------------------
+# ruff (linter)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["stock_prediction"]
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source  = ["src/stock_prediction"]
+omit    = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true

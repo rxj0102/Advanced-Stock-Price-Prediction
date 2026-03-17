@@ -4,21 +4,24 @@
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.0+-orange.svg)](https://scikit-learn.org/)
 [![XGBoost](https://img.shields.io/badge/XGBoost-1.5+-red.svg)](https://xgboost.readthedocs.io/)
 [![Jupyter](https://img.shields.io/badge/Jupyter-notebook-orange.svg)](https://jupyter.org/)
+[![Tests](https://img.shields.io/badge/tests-pytest-green.svg)](https://docs.pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A rigorous comparative study of **12+ machine learning algorithms** for predicting stock prices 5 trading days ahead. Covers 16 years of historical data (2008–2024) across 5 major stocks, 42 engineered features, and strict temporal validation to prevent lookahead bias.
+A rigorous comparative study of **12+ machine learning algorithms** for predicting stock prices 5 trading days ahead. Covers 16 years of historical data (2008–2024) across 5 major stocks, 40+ engineered technical features, and a strict temporal train/test split to prevent lookahead bias.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Results](#results)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
-- [Usage](#usage)
+- [Quick Start](#quick-start)
+- [Results](#results)
 - [Methodology](#methodology)
 - [Key Findings](#key-findings)
+- [Running Tests](#running-tests)
+- [Contributing](#contributing)
 - [License](#license)
 
 ---
@@ -32,9 +35,105 @@ A rigorous comparative study of **12+ machine learning algorithms** for predicti
 | **Time Period** | 2008-01-01 — 2024-01-01 (16 years) |
 | **Data Points** | 19,115 total (4,027 per stock) |
 | **Prediction Horizon** | 5 trading days |
-| **Features** | 42 engineered technical indicators |
+| **Features** | 40+ engineered technical indicators |
 | **Models Compared** | 12+ (linear → ensembles → neural networks) |
 | **Validation** | Temporal 80/20 train/test split |
+
+---
+
+## Project Structure
+
+```
+Advanced-Stock-Price-Prediction/
+│
+├── src/
+│   └── stock_prediction/          # Installable Python package
+│       ├── __init__.py
+│       ├── config.py              # All constants and hyperparameters
+│       ├── data/
+│       │   ├── __init__.py
+│       │   └── loader.py          # yfinance download & column flattening
+│       ├── features/
+│       │   ├── __init__.py
+│       │   └── engineer.py        # 40+ technical indicator features
+│       ├── models/
+│       │   ├── __init__.py
+│       │   ├── evaluate.py        # ModelMetrics dataclass + comparison table
+│       │   └── train.py           # build_models(), train_pipeline(), run_all_stocks()
+│       └── visualization/
+│           ├── __init__.py
+│           └── plots.py           # All matplotlib/seaborn chart functions
+│
+├── notebooks/
+│   └── analysis.ipynb             # Clean end-to-end notebook using src/
+│
+├── tests/
+│   ├── conftest.py                # Synthetic fixtures (no network required)
+│   ├── test_features.py           # Feature engineering tests
+│   ├── test_evaluate.py           # Metrics and comparison table tests
+│   └── test_train.py              # Pipeline and train/test split tests
+│
+├── adv_model_compare.ipynb        # Original exploratory notebook
+├── pyproject.toml                 # Package metadata, pytest, ruff config
+├── requirements.txt               # Pinned dependencies
+├── CONTRIBUTING.md
+├── LICENSE
+└── README.md
+```
+
+---
+
+## Installation
+
+```bash
+# 1. Clone
+git clone https://github.com/rxj0102/Advanced-Stock-Price-Prediction.git
+cd Advanced-Stock-Price-Prediction
+
+# 2. Create a virtual environment
+python -m venv venv
+source venv/bin/activate        # macOS / Linux
+# venv\Scripts\activate         # Windows
+
+# 3a. Install as an editable package (recommended for development)
+pip install -e ".[dev]"
+
+# 3b. Or just install runtime dependencies
+pip install -r requirements.txt
+
+# 4. (Optional) install boosting libraries
+pip install -e ".[boosting]"
+```
+
+---
+
+## Quick Start
+
+```python
+from stock_prediction.config      import STOCKS
+from stock_prediction.data        import download_stocks
+from stock_prediction.models      import build_models, build_ensemble, train_pipeline
+from stock_prediction.models.evaluate import build_comparison_table
+
+# Download 16 years of data for 5 stocks
+stock_data = download_stocks()
+
+# Build all models (linear, trees, ensembles, optional: XGBoost/LightGBM/CatBoost)
+base     = build_models()
+ensemble = build_ensemble(base)
+
+# Train & evaluate everything on AAPL with a temporal 80/20 split
+result = train_pipeline(stock_data["AAPL"], "AAPL", models={**base, **ensemble})
+
+# Pretty-print ranked comparison table
+print(build_comparison_table(result["results"]))
+```
+
+Or open the clean notebook:
+
+```bash
+jupyter notebook notebooks/analysis.ipynb
+```
 
 ---
 
@@ -57,7 +156,7 @@ A rigorous comparative study of **12+ machine learning algorithms** for predicti
 | 11 | XGBoost | -5.7477 | $52.37 | $48.53 | 30.65% | 51.96% |
 | 12 | SVR | -12.3763 | $73.73 | $65.67 | 40.97% | 49.48% |
 
-> **Key insight:** Linear models with regularization dramatically outperform tree-based and ensemble methods on this task. Without feature scaling normalization for tree models, raw price momentum features give linear models an inherent advantage.
+> **Key insight:** Linear models with regularization dramatically outperform tree-based and neural network models on this task. Short-lag price autocorrelation rewards linear extrapolation; tree models require return-relative normalisation to compete.
 
 ---
 
@@ -90,19 +189,7 @@ A rigorous comparative study of **12+ machine learning algorithms** for predicti
 | 9 | `Std_10` | 10-day rolling volatility | -0.45 |
 | 10 | `Std_20` | 20-day rolling volatility | +0.34 |
 
-17 of 42 features (40.5%) were zeroed out by Lasso — a natural feature selection step.
-
----
-
-### AAPL Prediction Accuracy Bands
-
-| Threshold | % of Predictions Within Range |
-|:---------:|:-----------------------------:|
-| ±1% | 21.0% |
-| ±2% | 42.1% |
-| ±3% | 59.2% |
-| ±5% | 80.1% |
-| ±10% | 98.0% |
+17 of 42 features (40.5%) were zeroed out by Lasso — automatic feature selection.
 
 ---
 
@@ -117,108 +204,84 @@ A rigorous comparative study of **12+ machine learning algorithms** for predicti
 
 ---
 
-## Project Structure
-
-```
-Advanced-Stock-Price-Prediction/
-├── adv_model_compare.ipynb   # Main analysis notebook (12 cells)
-├── requirements.txt          # Python dependencies
-├── LICENSE                   # MIT License
-└── README.md
-```
-
----
-
-## Installation
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/rxj0102/Advanced-Stock-Price-Prediction.git
-cd Advanced-Stock-Price-Prediction
-
-# 2. Create a virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate        # macOS/Linux
-# venv\Scripts\activate         # Windows
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Launch the notebook
-jupyter notebook adv_model_compare.ipynb
-```
-
----
-
-## Usage
-
-Open `adv_model_compare.ipynb` and run cells in order:
-
-| Cell | Description |
-|------|-------------|
-| 1 | Import libraries |
-| 2 | Download 5 stocks via `yfinance` (2008–2024) |
-| 3 | Engineer 42 technical features for AAPL |
-| 4 | Prepare feature matrix and temporal train/test split |
-| 5 | Define evaluation function; train Linear Regression baseline |
-| 6 | Train all 12 models and collect metrics |
-| 7 | Train regularized models (Ridge, Lasso, ElasticNet) |
-| 8 | Deep-dive on best model; build ensemble methods |
-| 9 | Run full pipeline across all 5 stocks |
-| 10 | Final results table and comprehensive summary |
-| 11 | Advanced models and sophisticated ensembles |
-| 12 | Feature engineering experiments and alternative approaches |
-
----
-
 ## Methodology
 
-### Feature Engineering
+### Feature Engineering (`src/stock_prediction/features/engineer.py`)
 
-42 features are engineered from raw OHLCV data:
+40+ features engineered from raw OHLCV data — **no future information used**:
 
 ```python
 features = {
-    'Moving Averages':  ['MA_5', 'MA_10', 'MA_20', 'MA_50', 'MA_100', 'MA_200'],
-    'Volatility':       ['Std_5', 'Std_10', 'Std_20', 'Std_50', 'Std_100', 'Std_200'],
-    'Crossovers':       ['MA_5_20_Crossover', 'MA_20_50_Crossover', 'MA_50_200_Crossover'],
-    'Ratios':           ['Price_MA20_Ratio', 'Price_MA50_Ratio', 'Price_MA200_Ratio'],
-    'Price Features':   ['High_Low_Range', 'Close_Open_Gap'],
-    'Volume':           ['Volume_Ratio', 'Volume_Price_Trend'],
-    'Lag Features':     ['Price_Lag_1', 'Price_Lag_2', 'Price_Lag_3', 'Price_Lag_5', 'Price_Lag_10'],
-    'Momentum':         ['Momentum_5', 'Momentum_20', 'ROC_5', 'ROC_20'],
-    'Rolling Stats':    ['Rolling_Max_20', 'Rolling_Min_20', 'Price_Position'],
+    "Moving Averages":  ["MA_5", "MA_10", "MA_20", "MA_50", "MA_100", "MA_200"],
+    "Volatility":       ["Std_5", "Std_10", "Std_20", "Std_50", "Std_100", "Std_200"],
+    "Crossovers":       ["MA_5_20_Crossover", "MA_20_50_Crossover", "MA_50_200_Crossover"],
+    "Ratios":           ["Price_MA20_Ratio", "Price_MA50_Ratio", "Price_MA200_Ratio"],
+    "Intra-day":        ["High_Low_Range", "Close_Open_Gap"],
+    "Volume":           ["Volume_Ratio", "Volume_Price_Trend"],
+    "Lag Features":     ["Price_Lag_1", ..., "Price_Lag_10"],
+    "Momentum":         ["Momentum_5", "Momentum_20", "ROC_5", "ROC_20"],
+    "Rolling Stats":    ["Rolling_Max_20", "Rolling_Min_20", "Price_Position"],
 }
 ```
 
 ### Validation Strategy
 
-- **Temporal split:** first 80% of data for training, last 20% for testing
-- No shuffling — preserves time-series ordering and prevents lookahead bias
-- All features are scaled with `StandardScaler` fit on training data only
+- **Temporal split:** first 80% for training, last 20% for testing
+- No shuffling — preserves time-series ordering
+- `StandardScaler` fit exclusively on training data, applied to test
 
-### Models Evaluated
+### Package API
 
-- **Linear:** Linear Regression, Ridge, Lasso (α=0.01), ElasticNet
-- **Tree-based:** Decision Tree, Random Forest, Gradient Boosting, XGBoost
-- **Other:** SVR, MLP Neural Network
-- **Ensembles:** Voting Regressor, Stacking Regressor
+```
+stock_prediction.config          — STOCKS, dates, hyperparameters
+stock_prediction.data.loader     — download_stocks()
+stock_prediction.features.engineer  — engineer_features(), prepare_xy()
+stock_prediction.models.evaluate — evaluate_model(), ModelMetrics, build_comparison_table()
+stock_prediction.models.train    — build_models(), train_pipeline(), run_all_stocks()
+stock_prediction.visualization.plots — plot_predictions(), plot_model_comparison(), …
+```
 
 ---
 
 ## Key Findings
 
-1. **Regularized linear models win.** Lasso (R²=0.91) and ElasticNet beat all tree-based and neural network models by a wide margin. Short-lag price features dominate, rewarding linear extrapolation.
+1. **Regularised linear models win.** Lasso (R²=0.91) and ElasticNet beat all tree-based and neural network models by a wide margin.
 
-2. **Tree-based models fail without target-relative scaling.** Negative R² scores indicate predictions worse than the mean — these models require raw price prediction without proper normalization.
+2. **Tree-based models fail without return-normalisation.** Negative R² scores indicate predictions worse than the mean baseline.
 
-3. **Lasso provides automatic feature selection.** 17/42 features are zeroed out, leaving a sparse and interpretable model.
+3. **Lasso performs automatic feature selection.** 17/42 features are zeroed out, producing a sparse, interpretable model.
 
-4. **Energy stocks are most predictable** (XOM R²=0.977). Healthcare is hardest (JNJ R²=0.774), likely due to idiosyncratic regulatory/clinical news events.
+4. **Energy stocks are most predictable** (XOM R²=0.977). Healthcare is hardest (JNJ R²=0.774).
 
-5. **Directional accuracy hovers near 50–54%** across all models — price level prediction is strong, but direction is harder and closer to random.
+5. **Directional accuracy hovers near 50–54%** — price level prediction is strong, direction is harder.
 
-6. **Short-term lag features dominate** — `Price_Lag_5` and `MA_5` are by far the most impactful features, confirming strong short-term autocorrelation in stock prices.
+6. **Short-term lags dominate.** `Price_Lag_5` and `MA_5` are the two most impactful features, confirming strong short-term autocorrelation.
+
+---
+
+## Running Tests
+
+```bash
+# All tests (no network required — uses synthetic data)
+pytest
+
+# With coverage report
+pytest --cov=src/stock_prediction --cov-report=term-missing
+
+# Single module
+pytest tests/test_features.py -v
+```
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow. Quick summary:
+
+1. Fork → feature branch → PR
+2. Clear all notebook outputs before committing (`Kernel > Restart & Clear Output`)
+3. Run `pytest` and ensure all tests pass
+4. Follow PEP 8 / `ruff` style
 
 ---
 
