@@ -6,14 +6,11 @@ scipy>=1.7.0
 # Financial data
 yfinance>=0.2.0
 
+# Parquet caching
+pyarrow>=8.0.0
+
 # Machine learning
 scikit-learn>=1.0.0
-xgboost>=1.5.0
-lightgbm>=3.3.0
-catboost>=1.0.0
-
-# Deep learning
-tensorflow>=2.8.0
 
 # Visualization
 matplotlib>=3.4.0
@@ -21,4 +18,14 @@ seaborn>=0.11.0
 
 # Notebook & utilities
 jupyter>=1.0.0
-tqdm>=4.62.0
+
+# Optional — gradient boosting (install with: pip install -e ".[boosting]")
+# xgboost>=1.5.0
+# lightgbm>=3.3.0
+# catboost>=1.0.0
+
+# Optional — deep learning (install with: pip install -e ".[deep]")
+# tensorflow>=2.8.0
+
+# Optional — SHAP feature importance (install with: pip install shap)
+# shap>=0.41.0

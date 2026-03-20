@@ -1,10 +1,14 @@
 """
-Technical indicator feature engineering.
+Stationary, returns-based feature engineering.
 
-All features are derived solely from *past* data so there is no lookahead
-bias.  The target column (``Target``) is the closing price
-``PREDICTION_HORIZON`` trading days *ahead*, created via a forward shift and
-dropped from ``X``.
+Directly based on adv_model_compare_v2.ipynb Cell 3.
+
+Key design choices (vs v1):
+  - Target  = 5-day log return (stationary, scale-invariant)
+  - Features = returns-based only — no raw price levels → no multicollinearity
+  - Calendar = cyclical sine/cosine encoding (not raw ordinal integers)
+  - 34 features across 8 categories
+  - Multicollinearity reduced from 100+ pairs (v1) to ~16 pairs
 """
 
 from __future__ import annotations
@@ -14,167 +18,153 @@ import logging
 import numpy as np
 import pandas as pd
 
-from stock_prediction.config import (
-    MA_WINDOWS,
-    LAG_WINDOWS,
-    PREDICTION_HORIZON,
-)
+from stock_prediction.config import PREDICTION_HORIZON
 
 logger = logging.getLogger(__name__)
 
 
-def engineer_features(
-    df: pd.DataFrame,
-    ticker: str,
-    prediction_horizon: int = PREDICTION_HORIZON,
-) -> pd.DataFrame:
-    """Add all technical indicators and the forward-return target.
+def engineer_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Build a stationary, returns-based feature matrix from OHLCV data.
 
     Parameters
     ----------
     df:
-        Flat OHLCV DataFrame with columns ``<TICKER>_Close``, etc.
-        (as returned by :func:`data.loader.download_stocks`).
+        Flat-column OHLCV DataFrame with columns Open, High, Low, Close, Volume.
     ticker:
-        Ticker symbol used to identify the price columns.
-    prediction_horizon:
-        Number of trading days ahead to predict.
+        Ticker symbol (used for logging only; all features are generic).
 
     Returns
     -------
     pd.DataFrame
-        Original columns **plus** engineered features and a ``Target``
-        column.  Rows with any ``NaN`` are dropped.
+        DataFrame with ``Target`` column + 34 engineered features.
+        Rows with any NaN are dropped.
     """
-    close  = f"{ticker}_Close"
-    high   = f"{ticker}_High"
-    low    = f"{ticker}_Low"
-    open_  = f"{ticker}_Open"
-    volume = f"{ticker}_Volume"
+    out = pd.DataFrame(index=df.index)
+    c = df["Close"]
 
-    out = df.copy()
+    # ── Target: log return over the prediction horizon (STATIONARY) ──────────
+    # log(C_{t+h} / C_t) — forward-shifted so there is no leakage
+    out["Target"] = np.log(c.shift(-PREDICTION_HORIZON) / c)
 
-    # ------------------------------------------------------------------
-    # Target
-    # ------------------------------------------------------------------
-    out["Target"] = out[close].shift(-prediction_horizon)
+    # ── 1. Multi-period log returns (all lagged, no current-day leakage) ─────
+    for n in [1, 2, 3, 5, 10, 20]:
+        out[f"LogRet_{n}d"] = np.log(c / c.shift(n))
 
-    # ------------------------------------------------------------------
-    # Returns
-    # ------------------------------------------------------------------
-    out["Return"]     = out[close].pct_change()
-    out["Log_Return"] = np.log(out[close] / out[close].shift(1))
+    # ── 2. Intraday microstructure (normalised — scale-invariant) ────────────
+    out["HL_Range"]       = (df["High"] - df["Low"]) / c
+    out["Close_Open_Pct"] = (c - df["Open"]) / df["Open"]
+    out["Upper_Shadow"]   = (df["High"] - np.maximum(c, df["Open"])) / c
+    out["Lower_Shadow"]   = (np.minimum(c, df["Open"]) - df["Low"]) / c
 
-    # ------------------------------------------------------------------
-    # Moving averages & rolling std
-    # ------------------------------------------------------------------
-    for w in MA_WINDOWS:
-        out[f"MA_{w}"]  = out[close].rolling(w).mean()
-        out[f"Std_{w}"] = out[close].rolling(w).std()
+    # ── 3. Volume (normalised) ────────────────────────────────────────────────
+    vol = df["Volume"]
+    out["Vol_LogChg"]    = np.log(vol / vol.shift(1))
+    out["Vol_Ratio_5d"]  = vol / vol.rolling(5).mean()
+    out["Vol_Ratio_20d"] = vol / vol.rolling(20).mean()
+    # Signed volume: positive on up days, negative on down days
+    out["OBV_Pct"] = (
+        (vol * np.sign(out["LogRet_1d"])).rolling(10).mean()
+        / vol.rolling(10).mean()
+    )
 
-    # ------------------------------------------------------------------
-    # MA crossovers
-    # ------------------------------------------------------------------
-    out["MA_5_20_Crossover"]  = out["MA_5"]  - out["MA_20"]
-    out["MA_20_50_Crossover"] = out["MA_20"] - out["MA_50"]
-    out["MA_50_200_Crossover"]= out["MA_50"] - out["MA_200"]
+    # ── 4. Trend: price distance from MAs (percent — scale-invariant) ────────
+    for w in [5, 20, 50]:
+        ma = c.rolling(w).mean()
+        out[f"Price_MA{w}_Pct"] = (c - ma) / ma
 
-    # ------------------------------------------------------------------
-    # Price-to-MA ratios
-    # ------------------------------------------------------------------
-    for w in [20, 50, 200]:
-        out[f"Price_MA{w}_Ratio"] = out[close] / out[f"MA_{w}"]
+    # ── 5. Volatility regime ──────────────────────────────────────────────────
+    ret1 = out["LogRet_1d"]
+    out["Vol_5d"]    = ret1.rolling(5).std()
+    out["Vol_20d"]   = ret1.rolling(20).std()
+    out["Vol_Ratio"] = out["Vol_5d"] / (out["Vol_20d"] + 1e-12)
+    out["ATR_14"] = (
+        pd.concat(
+            [
+                df["High"] - df["Low"],
+                (df["High"] - c.shift(1)).abs(),
+                (df["Low"]  - c.shift(1)).abs(),
+            ],
+            axis=1,
+        )
+        .max(axis=1)
+        .rolling(14)
+        .mean()
+        / c
+    )
 
-    # ------------------------------------------------------------------
-    # Volatility (return-based)
-    # ------------------------------------------------------------------
-    out["Volatility_20"] = out["Return"].rolling(20).std()
-    out["Volatility_50"] = out["Return"].rolling(50).std()
+    # ── 6. Momentum / oscillators ─────────────────────────────────────────────
+    out["Momentum_5d"]  = np.log(c / c.shift(5))
+    out["Momentum_20d"] = np.log(c / c.shift(20))
 
-    # ------------------------------------------------------------------
-    # Intra-day features
-    # ------------------------------------------------------------------
-    out["High_Low_Range"]  = (out[high] - out[low]) / out[close]
-    out["Close_Open_Gap"]  = (out[close] - out[open_]) / out[open_]
+    # RSI (14-day) — hand-rolled, no ta-lib dependency
+    delta = c.diff()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    rs    = gain / (loss + 1e-12)
+    out["RSI_14"] = 100 - (100 / (1 + rs))
 
-    # ------------------------------------------------------------------
-    # Volume
-    # ------------------------------------------------------------------
-    vol_ma20 = out[volume].rolling(20).mean()
-    out["Volume_Ratio"]       = out[volume] / vol_ma20
-    out["Volume_Price_Trend"] = out["Volume_Ratio"] * out["Return"]
+    # MACD histogram (12/26/9 EMA, price-normalised)
+    ema12       = c.ewm(span=12, adjust=False).mean()
+    ema26       = c.ewm(span=26, adjust=False).mean()
+    macd_line   = (ema12 - ema26) / c
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    out["MACD_Hist"] = macd_line - signal_line
 
-    # ------------------------------------------------------------------
-    # Lag features
-    # ------------------------------------------------------------------
-    for lag in LAG_WINDOWS:
-        out[f"Price_Lag_{lag}"]  = out[close].shift(lag)
-        out[f"Return_Lag_{lag}"] = out["Return"].shift(lag)
+    # Bollinger Bands (normalised)
+    bb_mean     = c.rolling(20).mean()
+    bb_std      = c.rolling(20).std()
+    out["BB_Width"] = (2 * bb_std) / bb_mean
+    out["BB_Pos"]   = (c - (bb_mean - 2 * bb_std)) / (4 * bb_std + 1e-12)
 
-    # ------------------------------------------------------------------
-    # Rolling range statistics
-    # ------------------------------------------------------------------
-    roll_max = out[close].rolling(20).max()
-    roll_min = out[close].rolling(20).min()
-    out["Rolling_Max_20"]  = roll_max
-    out["Rolling_Min_20"]  = roll_min
-    out["Price_Position"]  = (out[close] - roll_min) / (roll_max - roll_min)
+    # ── 7. Support / resistance (distance, normalised) ───────────────────────
+    high20 = df["High"].rolling(20).max()
+    low20  = df["Low"].rolling(20).min()
+    out["Dist_Resistance"] = (high20 - c) / c
+    out["Dist_Support"]    = (c - low20) / c
+    out["Price_Position"]  = (c - low20) / (high20 - low20 + 1e-12)
 
-    # ------------------------------------------------------------------
-    # Momentum & rate-of-change
-    # ------------------------------------------------------------------
-    out["Momentum_5"]  = out[close] - out[close].shift(5)
-    out["Momentum_20"] = out[close] - out[close].shift(20)
-    out["ROC_5"]       = (out[close] - out[close].shift(5))  / out[close].shift(5)
-    out["ROC_20"]      = (out[close] - out[close].shift(20)) / out[close].shift(20)
+    # ── 8. Calendar features — CYCLICAL encoding ─────────────────────────────
+    dow = out.index.dayofweek
+    mth = out.index.month
+    out["DOW_sin"]   = np.sin(2 * np.pi * dow / 5)
+    out["DOW_cos"]   = np.cos(2 * np.pi * dow / 5)
+    out["Month_sin"] = np.sin(2 * np.pi * mth / 12)
+    out["Month_cos"] = np.cos(2 * np.pi * mth / 12)
 
-    # ------------------------------------------------------------------
-    # Drop NaN rows (rolling look-back + target shift)
-    # ------------------------------------------------------------------
     before = len(out)
-    out = out.dropna()
+    out = out.dropna().copy()
     logger.debug(
         "%s: %d → %d rows after dropna (removed %d)",
-        ticker, before, len(out), before - len(out),
+        ticker,
+        before,
+        len(out),
+        before - len(out),
     )
 
     return out
 
 
-def prepare_xy(
-    df: pd.DataFrame,
-    ticker: str,
-) -> tuple[pd.DataFrame, pd.Series, list[str]]:
-    """Split the engineered DataFrame into feature matrix X and target y.
+def get_feature_cols(df: pd.DataFrame) -> list[str]:
+    """Return feature column names (all columns except ``Target``)."""
+    return [c for c in df.columns if c != "Target"]
 
-    Raw OHLCV columns and the current-period return are excluded from ``X``
-    to prevent lookahead.
+
+def prepare_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, list[str]]:
+    """Split engineered DataFrame into feature matrix X and target y.
 
     Parameters
     ----------
     df:
         Output of :func:`engineer_features`.
-    ticker:
-        Used to identify the raw OHLCV column names to exclude.
 
     Returns
     -------
     X : pd.DataFrame
-        Feature matrix (no NaN).
+        Feature matrix.
     y : pd.Series
-        Target series (forward price).
+        Target series (5-day log return).
     feature_cols : list[str]
-        Ordered list of column names in ``X``.
+        Ordered list of feature column names.
     """
-    exclude = {
-        "Target",
-        f"{ticker}_Close",
-        f"{ticker}_High",
-        f"{ticker}_Low",
-        f"{ticker}_Open",
-        f"{ticker}_Volume",
-        "Return",
-        "Log_Return",
-    }
-    feature_cols = [c for c in df.columns if c not in exclude]
+    feature_cols = get_feature_cols(df)
     return df[feature_cols], df["Target"], feature_cols

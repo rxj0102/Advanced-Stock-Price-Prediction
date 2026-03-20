@@ -1,5 +1,5 @@
 """
-Tests for stock_prediction.models.evaluate
+Tests for stock_prediction.models.evaluate (v2)
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import pytest
 from stock_prediction.models.evaluate import (
     ModelMetrics,
     build_comparison_table,
-    directional_accuracy,
     evaluate_model,
 )
 
@@ -24,42 +23,17 @@ from stock_prediction.models.evaluate import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _perfect(n: int = 100):
-    y = np.linspace(10, 110, n)
-    return y, y.copy()
-
-
-def _constant_pred(n: int = 100):
-    y_true = np.linspace(10, 110, n)
-    y_pred = np.full(n, y_true.mean())
+def _log_returns(n: int = 200, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """Synthetic log returns for testing (centred near 0)."""
+    rng = np.random.default_rng(seed)
+    y_true = rng.normal(0.0, 0.02, n)
+    y_pred = y_true + rng.normal(0.0, 0.005, n)
     return y_true, y_pred
 
 
-# ---------------------------------------------------------------------------
-# directional_accuracy
-# ---------------------------------------------------------------------------
-
-class TestDirectionalAccuracy:
-    def test_perfect_direction(self):
-        y = np.arange(1, 11, dtype=float)
-        assert directional_accuracy(y, y) == 1.0
-
-    def test_inverted_direction(self):
-        y = np.arange(1, 11, dtype=float)
-        assert directional_accuracy(y, y[::-1]) == 0.0
-
-    def test_short_array_returns_nan(self):
-        assert math.isnan(directional_accuracy(np.array([1.0]), np.array([2.0])))
-
-    def test_empty_array_returns_nan(self):
-        assert math.isnan(directional_accuracy(np.array([]), np.array([])))
-
-    def test_random_is_near_half(self):
-        rng = np.random.default_rng(0)
-        y_true = rng.normal(size=10_000)
-        y_pred = rng.normal(size=10_000)
-        acc = directional_accuracy(y_true, y_pred)
-        assert 0.45 < acc < 0.55
+def _perfect(n: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    y = np.linspace(-0.05, 0.05, n)
+    return y, y.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -67,42 +41,55 @@ class TestDirectionalAccuracy:
 # ---------------------------------------------------------------------------
 
 class TestEvaluateModel:
-    def test_perfect_predictions(self):
+    def test_perfect_predictions_r2(self):
         y_true, y_pred = _perfect()
         m = evaluate_model(y_true, y_pred, verbose=False)
         assert m.r2 == pytest.approx(1.0, abs=1e-6)
-        assert m.rmse == pytest.approx(0.0, abs=1e-6)
-        assert m.mape == pytest.approx(0.0, abs=1e-4)
 
-    def test_constant_pred_r2_zero(self):
-        y_true, y_pred = _constant_pred()
-        m = evaluate_model(y_true, y_pred, verbose=False)
-        assert m.r2 == pytest.approx(0.0, abs=1e-6)
-
-    def test_returns_model_metrics(self):
+    def test_perfect_predictions_rmse(self):
         y_true, y_pred = _perfect()
+        m = evaluate_model(y_true, y_pred, verbose=False)
+        assert m.rmse == pytest.approx(0.0, abs=1e-8)
+
+    def test_returns_model_metrics_instance(self):
+        y_true, y_pred = _log_returns()
         m = evaluate_model(y_true, y_pred, "TestModel", verbose=False)
         assert isinstance(m, ModelMetrics)
         assert m.model_name == "TestModel"
 
     def test_all_fields_finite(self):
-        rng = np.random.default_rng(1)
-        y_true = rng.normal(100, 10, 200)
-        y_pred = y_true + rng.normal(0, 2, 200)
+        y_true, y_pred = _log_returns()
         m = evaluate_model(y_true, y_pred, verbose=False)
-        for val in (m.mse, m.rmse, m.mae, m.r2, m.mape, m.directional_accuracy):
-            assert math.isfinite(val)
+        for val in (m.mse, m.rmse, m.mae, m.r2, m.mape, m.dir_acc, m.dir_pval):
+            assert math.isfinite(val), f"Non-finite value: {val}"
 
-    def test_mape_is_percentage(self):
-        y_true = np.array([100.0, 200.0, 300.0])
-        y_pred = np.array([110.0, 220.0, 330.0])  # 10% error each
+    def test_dir_acc_in_unit_interval(self):
+        y_true, y_pred = _log_returns()
         m = evaluate_model(y_true, y_pred, verbose=False)
-        assert m.mape == pytest.approx(10.0, abs=0.1)
+        assert 0.0 <= m.dir_acc <= 1.0
+
+    def test_dir_pval_in_unit_interval(self):
+        y_true, y_pred = _log_returns()
+        m = evaluate_model(y_true, y_pred, verbose=False)
+        assert 0.0 <= m.dir_pval <= 1.0
 
     def test_summary_dict_keys(self):
-        y, yp = _perfect()
-        m = evaluate_model(y, yp, verbose=False)
-        assert set(m.summary.keys()) == {"MSE", "RMSE", "MAE", "R2", "MAPE", "Directional_Accuracy"}
+        y_true, y_pred = _perfect()
+        m = evaluate_model(y_true, y_pred, verbose=False)
+        assert set(m.summary.keys()) == {"MSE", "RMSE", "MAE", "R2", "MAPE", "Dir_Acc", "Dir_p"}
+
+    def test_sig_stars_perfect_dir(self):
+        """All-correct direction should give significant p-value."""
+        y_true = np.array([0.01, -0.02, 0.03, -0.01, 0.02] * 40)
+        y_pred = y_true * 0.9  # same sign
+        m = evaluate_model(y_true, y_pred, verbose=False)
+        assert m.sig_stars in ("*", "**", "***")
+
+    def test_constant_pred_r2_zero(self):
+        y_true = np.linspace(-0.05, 0.05, 100)
+        y_pred = np.zeros_like(y_true)
+        m = evaluate_model(y_true, y_pred, verbose=False)
+        assert m.r2 == pytest.approx(0.0, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -110,28 +97,41 @@ class TestEvaluateModel:
 # ---------------------------------------------------------------------------
 
 class TestBuildComparisonTable:
-    def _make_metrics(self, names):
+    def _make_results(self, names: list[str]) -> dict:
         rng = np.random.default_rng(7)
         results = {}
         for name in names:
-            y = rng.normal(100, 10, 200)
-            yp = y + rng.normal(0, rng.uniform(1, 5))
-            results[name] = evaluate_model(y, yp, name, verbose=False)
+            y = rng.normal(0.0, 0.02, 200)
+            noise = rng.uniform(0.002, 0.008)
+            yp = y + rng.normal(0.0, noise, 200)
+            tr_m = evaluate_model(y, yp * 1.1, verbose=False)
+            te_m = evaluate_model(y, yp, name, verbose=False)
+            results[name] = (tr_m, te_m)
         return results
 
-    def test_sorted_descending_r2(self):
-        results = self._make_metrics(["A", "B", "C", "D"])
+    def test_sorted_descending_test_r2(self):
+        results = self._make_results(["A", "B", "C", "D"])
         df = build_comparison_table(results)
-        r2_vals = df["R²"].tolist()
+        r2_vals = df["Test R²"].astype(float).tolist()
         assert r2_vals == sorted(r2_vals, reverse=True)
 
     def test_all_models_present(self):
         names = ["ModelX", "ModelY", "ModelZ"]
-        results = self._make_metrics(names)
+        results = self._make_results(names)
         df = build_comparison_table(results)
         assert set(df["Model"]) == set(names)
 
     def test_index_starts_at_one(self):
-        results = self._make_metrics(["Alpha", "Beta"])
+        results = self._make_results(["Alpha", "Beta"])
         df = build_comparison_table(results)
         assert df.index[0] == 1
+
+    def test_gap_column_present(self):
+        results = self._make_results(["X", "Y"])
+        df = build_comparison_table(results)
+        assert "Gap" in df.columns
+
+    def test_dir_acc_column_present(self):
+        results = self._make_results(["X"])
+        df = build_comparison_table(results)
+        assert "Dir Acc" in df.columns

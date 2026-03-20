@@ -1,8 +1,9 @@
 """
-Publication-quality plotting functions.
+Visualization functions for the stock prediction project (v2).
 
-All functions return their ``Figure`` object so callers can
-``savefig`` or display as needed.
+Based on adv_model_compare_v2.ipynb Cells 7, 8, 11, 12.
+
+All plots operate on log-return scale to match the new stationary target.
 """
 
 from __future__ import annotations
@@ -13,19 +14,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy import stats
 
 # ---------------------------------------------------------------------------
 # Style defaults
 # ---------------------------------------------------------------------------
 plt.rcParams.update({
-    "axes.spines.top":    False,
-    "axes.spines.right":  False,
-    "axes.grid":          True,
-    "grid.alpha":         0.3,
-    "font.size":          11,
+    "axes.spines.top":   False,
+    "axes.spines.right": False,
+    "axes.grid":         True,
+    "grid.alpha":        0.3,
+    "font.size":         11,
 })
 
-SECTOR_COLORS = {
+SECTOR_COLORS: dict[str, str] = {
     "Technology": "#2196F3",
     "Financial":  "#4CAF50",
     "Healthcare": "#F44336",
@@ -34,199 +36,156 @@ SECTOR_COLORS = {
 
 
 # ---------------------------------------------------------------------------
-# Per-model plots
+# Model comparison plots (Cell 7)
 # ---------------------------------------------------------------------------
 
-def plot_predictions(
-    y_true: pd.Series | np.ndarray,
-    y_pred: np.ndarray,
-    model_name: str,
-    ticker: str = "",
+def plot_model_comparison(
+    comp_df: pd.DataFrame,
     *,
-    figsize: tuple[int, int] = (14, 5),
+    figsize: tuple[int, int] = (18, 6),
+    title: str = "Model Comparison — 5-Day Log Return",
 ) -> plt.Figure:
-    """Time-series overlay and scatter plot of actual vs predicted prices.
+    """Three-panel bar chart: Test R², overfitting gap, directional accuracy.
 
     Parameters
     ----------
-    y_true:
-        Actual target values (indexed by date if a Series).
-    y_pred:
-        Model predictions (same length as ``y_true``).
-    model_name:
-        Plot title label.
-    ticker:
-        Optional ticker to include in the title.
-    figsize:
-        Figure dimensions.
+    comp_df:
+        DataFrame as returned by :func:`models.evaluate.build_comparison_table`.
+        Must have columns: ``Model``, ``Test R²``, ``Gap``, ``Dir Acc``.
 
     Returns
     -------
     matplotlib.figure.Figure
     """
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
+    names   = list(comp_df["Model"])
+    r2_test = pd.to_numeric(comp_df["Test R²"], errors="coerce").tolist()
+    gap     = pd.to_numeric(comp_df["Gap"],     errors="coerce").tolist()
+    # Dir Acc column may include significance stars; extract the float
+    dir_acc = [
+        float(str(v).split()[0].replace("%", "")) / 100
+        for v in comp_df["Dir Acc"]
+    ]
 
-    label = f"{ticker} — {model_name}" if ticker else model_name
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    c_main = plt.cm.viridis(np.linspace(0.3, 0.85, len(names)))
+    c_gap  = ["#e74c3c" if g > 0.05 else "#2ecc71" for g in gap]
 
-    # -- Time-series overlay
-    ax1.plot(y_true, label="Actual",    color="#1565C0", linewidth=1.8)
-    ax1.plot(y_pred, label="Predicted", color="#E53935", linewidth=1.4, alpha=0.8)
-    ax1.set_title(f"{label}: Actual vs Predicted")
-    ax1.set_xlabel("Test period index")
-    ax1.set_ylabel("Price ($)")
-    ax1.legend()
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
 
-    # -- Scatter
-    lo = min(y_true.min(), y_pred.min())
-    hi = max(y_true.max(), y_pred.max())
-    ax2.scatter(y_true, y_pred, s=12, alpha=0.4, color="#7B1FA2")
-    ax2.plot([lo, hi], [lo, hi], "r--", linewidth=1.5, label="Perfect fit")
-    ax2.set_title(f"{label}: Scatter")
-    ax2.set_xlabel("Actual Price ($)")
-    ax2.set_ylabel("Predicted Price ($)")
-    ax2.legend()
+    axes[0].barh(names, r2_test, color=c_main)
+    axes[0].axvline(0, color="black", lw=0.5)
+    axes[0].set_xlabel("Test R²")
+    axes[0].set_title("Test R² (higher = better)")
+    axes[0].invert_yaxis()
 
-    fig.tight_layout()
+    axes[1].barh(names, gap, color=c_gap)
+    axes[1].axvline(0, color="black", lw=0.5)
+    axes[1].set_xlabel("Train R² − Test R²")
+    axes[1].set_title("Overfitting gap (lower = better)")
+    axes[1].invert_yaxis()
+
+    axes[2].barh(names, dir_acc, color=c_main)
+    axes[2].axvline(0.5, color="red", lw=1, ls="--", label="Random (50%)")
+    axes[2].set_xlabel("Directional Accuracy")
+    axes[2].set_title("Directional Accuracy")
+    axes[2].legend(fontsize=9)
+    axes[2].invert_yaxis()
+
+    plt.suptitle(title, fontsize=14, fontweight="bold")
+    plt.tight_layout()
     return fig
 
+
+# ---------------------------------------------------------------------------
+# Residual / deep-dive plots (Cell 8)
+# ---------------------------------------------------------------------------
 
 def plot_residuals(
     y_true: pd.Series | np.ndarray,
     y_pred: np.ndarray,
     model_name: str,
     *,
-    figsize: tuple[int, int] = (14, 5),
+    figsize: tuple[int, int] = (18, 5),
 ) -> plt.Figure:
-    """Residual time-series and distribution plot.
+    """Three-panel residual analysis: time series, histogram, Q-Q plot.
 
     Returns
     -------
     matplotlib.figure.Figure
     """
-    residuals = np.asarray(y_true, dtype=float) - np.asarray(y_pred, dtype=float)
+    y_true    = np.asarray(y_true, dtype=float)
+    residuals = y_true - np.asarray(y_pred, dtype=float)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
 
-    ax1.plot(residuals, color="#6A1B9A", alpha=0.7, linewidth=0.9)
-    ax1.axhline(0, color="#E53935", linestyle="--", alpha=0.6)
-    ax1.set_title(f"{model_name}: Residuals over Time")
-    ax1.set_xlabel("Test period index")
-    ax1.set_ylabel("Residual ($)")
+    axes[0].plot(residuals, color="purple", alpha=0.6, lw=0.8)
+    axes[0].axhline(0, color="red", ls="--")
+    axes[0].set_title("Residuals over time")
+    axes[0].set_ylabel("Residual (log return)")
 
-    ax2.hist(residuals, bins=35, edgecolor="white", color="#4A148C", alpha=0.8)
-    ax2.axvline(0, color="#E53935", linestyle="--", alpha=0.6)
-    ax2.set_title(f"{model_name}: Residual Distribution")
-    ax2.set_xlabel("Residual ($)")
-    ax2.set_ylabel("Count")
+    axes[1].hist(residuals, bins=40, edgecolor="black", alpha=0.7, color="steelblue")
+    axes[1].axvline(0, color="red", ls="--")
+    axes[1].set_title("Residual distribution")
+    axes[1].set_xlabel("Residual")
 
+    (quantiles, values), (slope, intercept, r) = stats.probplot(residuals, dist="norm")
+    axes[2].scatter(quantiles, values, s=8, alpha=0.5)
+    axes[2].plot(quantiles, slope * quantiles + intercept, "r-", lw=1.5)
+    axes[2].set_title(f"Q-Q Plot (r={r:.3f})")
+    axes[2].set_xlabel("Theoretical quantiles")
+    axes[2].set_ylabel("Sample quantiles")
+
+    plt.suptitle(f"Residual Analysis — {model_name}", fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    return fig
+
+
+def plot_coefficients(
+    model,
+    feature_cols: list[str],
+    model_name: str = "Model",
+    top_n: int = 20,
+    *,
+    figsize: tuple[int, int] = (10, 7),
+) -> plt.Figure:
+    """Horizontal bar chart of top-N Lasso / linear coefficients.
+
+    Parameters
+    ----------
+    model:
+        Fitted model with ``coef_`` attribute.
+    feature_cols:
+        Ordered feature names.
+    top_n:
+        How many features to show.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    if not hasattr(model, "coef_"):
+        raise ValueError("Model has no coef_ attribute")
+
+    coef = pd.Series(model.coef_, index=feature_cols)
+    top20 = coef.abs().sort_values(ascending=False).head(top_n)
+    top20_coef = coef[top20.index]
+    colors = ["#27ae60" if c > 0 else "#e74c3c" for c in top20_coef]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.barh(top20_coef.index[::-1], top20_coef.values[::-1], color=colors[::-1])
+    ax.axvline(0, color="black", lw=0.8)
+    ax.set_title(
+        f"{model_name}: Top {top_n} Coefficients\n"
+        "(green = positive return signal, red = negative)",
+        fontsize=12,
+    )
+    ax.set_xlabel("Coefficient (on RobustScaler-scaled features)")
     fig.tight_layout()
     return fig
 
 
 # ---------------------------------------------------------------------------
-# Comparison plots
+# Feature importance (Cell 6)
 # ---------------------------------------------------------------------------
-
-def plot_model_comparison(
-    comparison_df: pd.DataFrame,
-    *,
-    figsize: tuple[int, int] = (14, 10),
-) -> plt.Figure:
-    """Four-panel bar chart comparing R², RMSE, MAE, and MAPE.
-
-    Parameters
-    ----------
-    comparison_df:
-        DataFrame as returned by :func:`models.evaluate.build_comparison_table`.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-    """
-    metrics = [
-        ("R²",          "R² (↑ better)",  False),
-        ("RMSE ($)",    "RMSE $ (↓ better)", True),
-        ("MAE ($)",     "MAE $ (↓ better)",  True),
-        ("MAPE (%)",    "MAPE % (↓ better)", True),
-    ]
-
-    fig, axes = plt.subplots(2, 2, figsize=figsize)
-    axes = axes.flatten()
-
-    for ax, (col, xlabel, ascending) in zip(axes, metrics):
-        sub = comparison_df.sort_values(col, ascending=ascending)
-        bars = ax.barh(sub["Model"], sub[col],
-                       color=["#1565C0" if i == 0 else "#90CAF9"
-                              for i in range(len(sub))])
-        ax.set_xlabel(xlabel)
-        ax.set_title(f"Model {xlabel}")
-        if col == "R²":
-            ax.axvline(0, color="red", linestyle="--", linewidth=0.8)
-
-    fig.tight_layout()
-    return fig
-
-
-def plot_cross_stock_comparison(
-    stock_metrics: dict[str, dict],
-    sector_map: Optional[dict[str, str]] = None,
-    *,
-    figsize: tuple[int, int] = (14, 6),
-) -> plt.Figure:
-    """Side-by-side R² and RMSE bar charts across stocks, coloured by sector.
-
-    Parameters
-    ----------
-    stock_metrics:
-        ``{ticker: {"r2": float, "rmse": float}}`` mapping.
-    sector_map:
-        ``{ticker: sector}`` for colour coding.  Falls back to gray if absent.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-    """
-    tickers = list(stock_metrics.keys())
-    r2s     = [stock_metrics[t]["r2"]   for t in tickers]
-    rmses   = [stock_metrics[t]["rmse"] for t in tickers]
-
-    colors = []
-    for t in tickers:
-        sector = (sector_map or {}).get(t, "")
-        colors.append(SECTOR_COLORS.get(sector, "#9E9E9E"))
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
-
-    avg_r2 = float(np.mean(r2s))
-    ax1.bar(tickers, r2s, color=colors)
-    ax1.axhline(avg_r2, color="red", linestyle="--", alpha=0.7, label=f"Avg {avg_r2:.3f}")
-    ax1.set_ylabel("R²  (↑ better)")
-    ax1.set_title("R² by Stock (Lasso)")
-    ax1.legend()
-
-    avg_rmse = float(np.mean(rmses))
-    ax2.bar(tickers, rmses, color=colors)
-    ax2.axhline(avg_rmse, color="red", linestyle="--", alpha=0.7, label=f"Avg ${avg_rmse:.2f}")
-    ax2.set_ylabel("RMSE $  (↓ better)")
-    ax2.set_title("RMSE by Stock (Lasso)")
-    ax2.legend()
-
-    # Sector legend
-    if sector_map:
-        from matplotlib.patches import Patch
-        legend_handles = [
-            Patch(facecolor=color, label=sector)
-            for sector, color in SECTOR_COLORS.items()
-            if sector in sector_map.values()
-        ]
-        ax2.legend(handles=legend_handles, title="Sector",
-                   bbox_to_anchor=(1.02, 1), loc="upper left")
-
-    fig.tight_layout()
-    return fig
-
 
 def plot_feature_importance(
     model,
@@ -236,20 +195,7 @@ def plot_feature_importance(
     *,
     figsize: tuple[int, int] = (10, 8),
 ) -> plt.Figure:
-    """Horizontal bar chart of feature importances (tree models) or
-    absolute Lasso coefficients.
-
-    Parameters
-    ----------
-    model:
-        Fitted sklearn-compatible estimator with either
-        ``feature_importances_`` or ``coef_`` attribute.
-    feature_cols:
-        Ordered list of feature names.
-    title:
-        Chart title.
-    top_n:
-        How many features to show.
+    """Horizontal bar chart for tree-based feature importances or |coef_|.
 
     Returns
     -------
@@ -275,4 +221,170 @@ def plot_feature_importance(
     ax.set_xlabel(xlabel)
     ax.set_title(title)
     fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Cross-stock comparison (Cell 11)
+# ---------------------------------------------------------------------------
+
+def plot_cross_stock_comparison(
+    stock_results: dict[str, dict],
+    *,
+    figsize: tuple[int, int] = (14, 6),
+) -> plt.Figure:
+    """Side-by-side R² and directional accuracy bars coloured by sector.
+
+    Parameters
+    ----------
+    stock_results:
+        Output of :func:`models.train.run_all_stocks`.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    tickers  = list(stock_results.keys())
+    r2s      = [stock_results[t]["test_metrics"].r2       for t in tickers]
+    dir_accs = [stock_results[t]["test_metrics"].dir_acc  for t in tickers]
+    colors   = [SECTOR_COLORS.get(stock_results[t]["sector"], "#9E9E9E") for t in tickers]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+    avg_r2 = float(np.mean(r2s))
+    ax1.bar(tickers, r2s, color=colors)
+    ax1.axhline(avg_r2, color="red", ls="--", alpha=0.7, label=f"Avg {avg_r2:.4f}")
+    ax1.set_ylabel("Test R²  (↑ better)")
+    ax1.set_title("Test R² by Stock (LassoCV)")
+    ax1.legend()
+
+    avg_dir = float(np.mean(dir_accs))
+    ax2.bar(tickers, dir_accs, color=colors)
+    ax2.axhline(0.5, color="red",    ls="--", alpha=0.7, label="Random (50%)")
+    ax2.axhline(avg_dir, color="blue", ls=":",  alpha=0.7, label=f"Avg {avg_dir:.2%}")
+    ax2.set_ylabel("Directional Accuracy")
+    ax2.set_title("Directional Accuracy by Stock")
+    ax2.legend()
+
+    if any(stock_results[t].get("sector") for t in tickers):
+        from matplotlib.patches import Patch
+        present_sectors = {stock_results[t]["sector"] for t in tickers}
+        handles = [
+            Patch(facecolor=SECTOR_COLORS[s], label=s)
+            for s in SECTOR_COLORS if s in present_sectors
+        ]
+        ax2.legend(handles=handles, title="Sector",
+                   bbox_to_anchor=(1.02, 1), loc="upper left")
+
+    plt.suptitle("Cross-Stock Performance (LassoCV, 5-day log return)", fontsize=13)
+    plt.tight_layout()
+    return fig
+
+
+def plot_coef_heatmap(
+    stock_results: dict[str, dict],
+    min_tickers: int = 2,
+    *,
+    figsize: Optional[tuple[int, int]] = None,
+) -> plt.Figure:
+    """Heatmap of Lasso coefficients across all tickers.
+
+    Parameters
+    ----------
+    stock_results:
+        Output of :func:`models.train.run_all_stocks`.
+    min_tickers:
+        Only show features selected (non-zero) in at least this many tickers.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    coef_matrix = pd.DataFrame(
+        {t: r["coef"] for t, r in stock_results.items()}
+    ).T
+
+    selected = (coef_matrix != 0).sum(axis=0) >= min_tickers
+    coef_show = coef_matrix.loc[:, selected]
+
+    if coef_show.empty:
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No features selected in >= 2 tickers", ha="center")
+        return fig
+
+    if figsize is None:
+        figsize = (min(18, coef_show.shape[1] * 0.9 + 2), 4)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.heatmap(
+        coef_show, cmap="RdBu_r", center=0, linewidths=0.3,
+        annot=coef_show.shape[1] <= 20, fmt=".3f",
+        cbar_kws={"label": "Coefficient"}, ax=ax,
+    )
+    ax.set_title(
+        f"Lasso Coefficients Across Tickers\n(features selected in ≥{min_tickers} tickers)",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Backtest plot (Cell 12)
+# ---------------------------------------------------------------------------
+
+def plot_backtest(
+    y_true_log_ret: np.ndarray,
+    y_pred_log_ret: np.ndarray,
+    model_name: str = "Model",
+    *,
+    transaction_cost: float = 0.001,
+    figsize: tuple[int, int] = (14, 5),
+) -> plt.Figure:
+    """Plot cumulative returns and drawdown for a long/short backtest.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    y_true  = np.asarray(y_true_log_ret, dtype=float)
+    y_pred  = np.asarray(y_pred_log_ret, dtype=float)
+    signals = np.sign(y_pred)
+
+    position_change = np.diff(np.concatenate([[0], signals])) != 0
+    strategy_ret    = signals * y_true - position_change * transaction_cost
+    bah_ret         = y_true
+
+    cum_strategy = (np.exp(np.cumsum(strategy_ret)) - 1) * 100
+    cum_bah      = (np.exp(np.cumsum(bah_ret)) - 1) * 100
+
+    wealth   = np.exp(np.cumsum(strategy_ret))
+    peak     = np.maximum.accumulate(wealth)
+    drawdown = ((wealth - peak) / peak) * 100
+
+    sharpe = (
+        np.mean(strategy_ret) / (np.std(strategy_ret) + 1e-12)
+        * np.sqrt(252)
+    )
+    ann_ret = float(np.sum(strategy_ret) * 252 / len(strategy_ret))
+    max_dd  = float(drawdown.min())
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    axes[0].plot(cum_strategy, label="Strategy",     color="steelblue")
+    axes[0].plot(cum_bah,      label="Buy & Hold",   color="orange", alpha=0.7)
+    axes[0].axhline(0, color="black", lw=0.5, ls="--")
+    axes[0].set_ylabel("Cumulative Return (%)")
+    axes[0].set_title(f"{model_name}: Cumulative Returns")
+    axes[0].legend()
+
+    axes[1].fill_between(range(len(drawdown)), drawdown, 0, color="red", alpha=0.5)
+    axes[1].set_ylabel("Drawdown (%)")
+    axes[1].set_title(f"{model_name}: Drawdown")
+
+    plt.suptitle(
+        f"Sharpe={sharpe:.2f}  Ann.Ret={ann_ret:.2%}  MaxDD={max_dd:.2%}",
+        fontsize=11,
+    )
+    plt.tight_layout()
     return fig

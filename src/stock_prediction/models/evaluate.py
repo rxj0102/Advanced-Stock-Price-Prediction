@@ -1,17 +1,23 @@
 """
 Model evaluation utilities.
 
-Provides :func:`evaluate_model` which returns a :class:`ModelMetrics`
-dataclass and optionally prints a formatted report.
+Based on adv_model_compare_v2.ipynb Cell 4.
+
+Key improvements over v1:
+  - Metrics operate on log-return scale (not price levels)
+  - Directional accuracy includes a binomial significance test (p-value)
+  - evaluate_model returns both train & test metrics for overfitting diagnosis
+  - build_comparison_table shows Train R², Test R², and overfitting gap
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 logger = logging.getLogger(__name__)
@@ -19,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ModelMetrics:
-    """Container for all regression evaluation metrics."""
+    """Container for regression + directional evaluation metrics (log-return scale)."""
 
     model_name: str
     mse:  float
@@ -27,56 +33,42 @@ class ModelMetrics:
     mae:  float
     r2:   float
     mape: float
-    directional_accuracy: float
+    dir_acc:   float   # directional accuracy [0, 1]
+    dir_pval:  float   # binomial p-value vs random (H0: p=0.5)
 
-    # ------------------------------------------------------------------ #
-    # Derived helpers                                                      #
-    # ------------------------------------------------------------------ #
+    @property
+    def sig_stars(self) -> str:
+        """Significance stars for directional accuracy."""
+        if self.dir_pval < 0.001:
+            return "***"
+        if self.dir_pval < 0.01:
+            return "**"
+        if self.dir_pval < 0.05:
+            return "*"
+        return "(ns)"
 
     @property
     def summary(self) -> dict[str, float]:
         return {
-            "MSE":  self.mse,
-            "RMSE": self.rmse,
-            "MAE":  self.mae,
-            "R2":   self.r2,
-            "MAPE": self.mape,
-            "Directional_Accuracy": self.directional_accuracy,
+            "MSE":     self.mse,
+            "RMSE":    self.rmse,
+            "MAE":     self.mae,
+            "R2":      self.r2,
+            "MAPE":    self.mape,
+            "Dir_Acc": self.dir_acc,
+            "Dir_p":   self.dir_pval,
         }
 
     def __str__(self) -> str:
         lines = [
-            f"{'=' * 52}",
+            f"{'─' * 52}",
             f"  {self.model_name}",
-            f"{'=' * 52}",
-            f"  R²   : {self.r2:.4f}   ({self.r2 * 100:.1f}% variance explained)",
-            f"  RMSE : ${self.rmse:.2f}",
-            f"  MAE  : ${self.mae:.2f}",
-            f"  MAPE : {self.mape:.2f}%",
-            f"  Dir. accuracy : {self.directional_accuracy:.2%}",
+            f"{'─' * 52}",
+            f"  RMSE : {self.rmse:.6f}  |  MAE  : {self.mae:.6f}",
+            f"  R²   : {self.r2:.4f}   |  MAPE : {self.mape:.2f}%",
+            f"  Dir  : {self.dir_acc:.2%}  {self.sig_stars}  (p={self.dir_pval:.4f})",
         ]
         return "\n".join(lines)
-
-
-def directional_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Fraction of periods where predicted direction matches actual direction.
-
-    Parameters
-    ----------
-    y_true, y_pred:
-        Arrays of the same length (≥ 2).
-
-    Returns
-    -------
-    float
-        Value in [0, 1]; ``float("nan")`` if fewer than 2 observations.
-    """
-    if len(y_true) < 2:
-        return float("nan")
-    true_dir = np.diff(y_true) > 0
-    pred_dir = np.diff(y_pred) > 0
-    n = min(len(true_dir), len(pred_dir))
-    return float(np.mean(true_dir[:n] == pred_dir[:n]))
 
 
 def evaluate_model(
@@ -86,18 +78,20 @@ def evaluate_model(
     *,
     verbose: bool = True,
 ) -> ModelMetrics:
-    """Compute and (optionally) print a comprehensive set of metrics.
+    """Compute regression + directional metrics for a return-predicting model.
+
+    All metrics operate on the log-return scale.
 
     Parameters
     ----------
     y_true:
-        Ground-truth target values.
+        Ground-truth log returns.
     y_pred:
         Model predictions.
     model_name:
         Label used in the printed report.
     verbose:
-        When ``True`` (default), print the formatted report to stdout.
+        Print formatted report when True.
 
     Returns
     -------
@@ -106,25 +100,26 @@ def evaluate_model(
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
 
-    mse  = mean_squared_error(y_true, y_pred)
+    mse  = float(mean_squared_error(y_true, y_pred))
     rmse = float(np.sqrt(mse))
-    mae  = mean_absolute_error(y_true, y_pred)
-    r2   = r2_score(y_true, y_pred)
+    mae  = float(mean_absolute_error(y_true, y_pred))
+    r2   = float(r2_score(y_true, y_pred))
 
-    # MAPE — guard against zero denominators
-    eps  = 1e-10
-    mape = float(np.mean(np.abs((y_true - y_pred) / (np.abs(y_true) + eps))) * 100)
+    # MAPE: guard against near-zero log returns
+    eps  = np.finfo(float).eps
+    mape = float(np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + eps)) * 100)
 
-    dir_acc = directional_accuracy(y_true, y_pred)
+    # Directional accuracy + two-sided binomial significance test
+    dir_true  = (y_true > 0).astype(int)
+    dir_pred  = (y_pred > 0).astype(int)
+    dir_acc   = float(np.mean(dir_true == dir_pred))
+    n_correct = int(dir_acc * len(dir_true))
+    dir_pval  = float(stats.binomtest(n_correct, len(dir_true), p=0.5).pvalue)
 
     metrics = ModelMetrics(
         model_name=model_name,
-        mse=float(mse),
-        rmse=rmse,
-        mae=float(mae),
-        r2=float(r2),
-        mape=mape,
-        directional_accuracy=dir_acc,
+        mse=mse, rmse=rmse, mae=mae, r2=r2, mape=mape,
+        dir_acc=dir_acc, dir_pval=dir_pval,
     )
 
     if verbose:
@@ -133,30 +128,40 @@ def evaluate_model(
     return metrics
 
 
-def build_comparison_table(results: dict[str, ModelMetrics]) -> pd.DataFrame:
-    """Convert a dict of :class:`ModelMetrics` into a sorted DataFrame.
+def build_comparison_table(
+    results: dict[str, tuple[ModelMetrics, ModelMetrics]],
+) -> pd.DataFrame:
+    """Build a ranked comparison DataFrame from (train, test) metric pairs.
 
     Parameters
     ----------
     results:
-        ``{model_name: ModelMetrics}`` mapping.
+        ``{model_name: (train_metrics, test_metrics)}`` mapping.
 
     Returns
     -------
     pd.DataFrame
-        Rows sorted by R² descending.
+        Rows sorted by Test R² descending, with overfitting gap column.
     """
     rows = []
-    for name, m in results.items():
+    for name, (tr, te) in results.items():
         rows.append({
-            "Model":             name,
-            "R²":                round(m.r2,   4),
-            "RMSE ($)":          round(m.rmse, 2),
-            "MAE ($)":           round(m.mae,  2),
-            "MAPE (%)":          round(m.mape, 2),
-            "Dir. Acc. (%)":     round(m.directional_accuracy * 100, 2),
+            "Model":     name,
+            "Train R²":  round(tr.r2, 4),
+            "Test R²":   round(te.r2, 4),
+            "Gap":       round(tr.r2 - te.r2, 4),
+            "RMSE":      round(te.rmse, 6),
+            "MAE":       round(te.mae, 6),
+            "Dir Acc":   f"{te.dir_acc:.2%} {te.sig_stars}",
+            "_r2":       te.r2,
         })
-    df = pd.DataFrame(rows).sort_values("R²", ascending=False).reset_index(drop=True)
-    df.index += 1          # 1-based rank
+
+    df = (
+        pd.DataFrame(rows)
+        .sort_values("_r2", ascending=False)
+        .drop("_r2", axis=1)
+        .reset_index(drop=True)
+    )
+    df.index = range(1, len(df) + 1)
     df.index.name = "Rank"
     return df
