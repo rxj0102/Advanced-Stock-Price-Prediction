@@ -1,10 +1,8 @@
 """
 Download historical OHLCV data from Yahoo Finance via yfinance.
 
-Features from adv_model_compare_v2.ipynb:
-  - Local parquet caching to avoid re-downloading on every run
-  - Flat single-level columns: Open, High, Low, Close, Volume
-  - Data quality check for long NaN runs
+Uses a local parquet cache so repeated runs do not re-download data.
+Returns flat single-level DataFrames with columns Open, High, Low, Close, Volume.
 """
 
 from __future__ import annotations
@@ -42,21 +40,21 @@ def download_or_load(
     start, end:
         Date strings accepted by yfinance (``"YYYY-MM-DD"``).
     cache_dir:
-        Directory for parquet files.
+        Directory for parquet cache files.
 
     Returns
     -------
     pd.DataFrame
-        Flat-column OHLCV DataFrame (Open, High, Low, Close, Volume).
+        Flat OHLCV DataFrame with columns Open, High, Low, Close, Volume.
     """
     os.makedirs(cache_dir, exist_ok=True)
-    safe_name = ticker.replace("^", "")
+    safe_name  = ticker.replace("^", "")
     cache_path = os.path.join(cache_dir, f"{safe_name}.parquet")
 
     if os.path.exists(cache_path):
         df = pd.read_parquet(cache_path)
         covers_start = df.index.min() <= pd.Timestamp(start)
-        covers_end = df.index.max() >= pd.Timestamp(end) - pd.Timedelta(days=10)
+        covers_end   = df.index.max() >= pd.Timestamp(end) - pd.Timedelta(days=10)
         if covers_start and covers_end:
             logger.info("%s: loaded from cache (%d rows)", ticker, len(df))
             return df
@@ -100,9 +98,7 @@ def download_stocks(
     if tickers is None:
         tickers = STOCKS
 
-    logger.info(
-        "Fetching %d stocks [%s → %s]", len(tickers), start, end
-    )
+    logger.info("Fetching %d stocks [%s → %s]", len(tickers), start, end)
 
     result: dict[str, pd.DataFrame] = {}
     failed: list[str] = []
@@ -121,8 +117,7 @@ def download_stocks(
             if nan_runs.max() >= 5:
                 logger.warning(
                     "%s: long NaN run detected (max %d) — check source data",
-                    ticker,
-                    nan_runs.max(),
+                    ticker, nan_runs.max(),
                 )
             result[ticker] = df
         except Exception as exc:
@@ -141,7 +136,7 @@ def download_benchmark(
     end: str = END_DATE,
     cache_dir: str = CACHE_DIR,
 ) -> pd.DataFrame | None:
-    """Download or load the S&P 500 benchmark (^GSPC)."""
+    """Download or load the S&P 500 benchmark index (^GSPC)."""
     try:
         return download_or_load(BENCHMARK, start=start, end=end, cache_dir=cache_dir)
     except Exception as exc:

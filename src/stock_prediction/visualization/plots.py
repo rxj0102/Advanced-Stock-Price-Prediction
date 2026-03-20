@@ -1,9 +1,7 @@
 """
-Visualization functions for the stock prediction project (v2).
+Visualization functions for stock return prediction results.
 
-Based on adv_model_compare_v2.ipynb Cells 7, 8, 11, 12.
-
-All plots operate on log-return scale to match the new stationary target.
+All plots operate on the log-return scale to match the stationary target.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ SECTOR_COLORS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Model comparison plots (Cell 7)
+# Model comparison
 # ---------------------------------------------------------------------------
 
 def plot_model_comparison(
@@ -51,7 +49,6 @@ def plot_model_comparison(
     ----------
     comp_df:
         DataFrame as returned by :func:`models.evaluate.build_comparison_table`.
-        Must have columns: ``Model``, ``Test R²``, ``Gap``, ``Dir Acc``.
 
     Returns
     -------
@@ -60,7 +57,6 @@ def plot_model_comparison(
     names   = list(comp_df["Model"])
     r2_test = pd.to_numeric(comp_df["Test R²"], errors="coerce").tolist()
     gap     = pd.to_numeric(comp_df["Gap"],     errors="coerce").tolist()
-    # Dir Acc column may include significance stars; extract the float
     dir_acc = [
         float(str(v).split()[0].replace("%", "")) / 100
         for v in comp_df["Dir Acc"]
@@ -96,7 +92,7 @@ def plot_model_comparison(
 
 
 # ---------------------------------------------------------------------------
-# Residual / deep-dive plots (Cell 8)
+# Residual analysis
 # ---------------------------------------------------------------------------
 
 def plot_residuals(
@@ -147,16 +143,7 @@ def plot_coefficients(
     *,
     figsize: tuple[int, int] = (10, 7),
 ) -> plt.Figure:
-    """Horizontal bar chart of top-N Lasso / linear coefficients.
-
-    Parameters
-    ----------
-    model:
-        Fitted model with ``coef_`` attribute.
-    feature_cols:
-        Ordered feature names.
-    top_n:
-        How many features to show.
+    """Horizontal bar chart of the top-N linear model coefficients.
 
     Returns
     -------
@@ -165,13 +152,13 @@ def plot_coefficients(
     if not hasattr(model, "coef_"):
         raise ValueError("Model has no coef_ attribute")
 
-    coef = pd.Series(model.coef_, index=feature_cols)
-    top20 = coef.abs().sort_values(ascending=False).head(top_n)
-    top20_coef = coef[top20.index]
-    colors = ["#27ae60" if c > 0 else "#e74c3c" for c in top20_coef]
+    coef       = pd.Series(model.coef_, index=feature_cols)
+    top_abs    = coef.abs().sort_values(ascending=False).head(top_n)
+    top_coef   = coef[top_abs.index]
+    colors     = ["#27ae60" if c > 0 else "#e74c3c" for c in top_coef]
 
     fig, ax = plt.subplots(figsize=figsize)
-    ax.barh(top20_coef.index[::-1], top20_coef.values[::-1], color=colors[::-1])
+    ax.barh(top_coef.index[::-1], top_coef.values[::-1], color=colors[::-1])
     ax.axvline(0, color="black", lw=0.8)
     ax.set_title(
         f"{model_name}: Top {top_n} Coefficients\n"
@@ -184,7 +171,7 @@ def plot_coefficients(
 
 
 # ---------------------------------------------------------------------------
-# Feature importance (Cell 6)
+# Feature importance
 # ---------------------------------------------------------------------------
 
 def plot_feature_importance(
@@ -195,7 +182,7 @@ def plot_feature_importance(
     *,
     figsize: tuple[int, int] = (10, 8),
 ) -> plt.Figure:
-    """Horizontal bar chart for tree-based feature importances or |coef_|.
+    """Horizontal bar chart for tree feature importances or |coef_|.
 
     Returns
     -------
@@ -225,7 +212,7 @@ def plot_feature_importance(
 
 
 # ---------------------------------------------------------------------------
-# Cross-stock comparison (Cell 11)
+# Cross-stock comparison
 # ---------------------------------------------------------------------------
 
 def plot_cross_stock_comparison(
@@ -233,7 +220,7 @@ def plot_cross_stock_comparison(
     *,
     figsize: tuple[int, int] = (14, 6),
 ) -> plt.Figure:
-    """Side-by-side R² and directional accuracy bars coloured by sector.
+    """Side-by-side Test R² and directional accuracy bars coloured by sector.
 
     Parameters
     ----------
@@ -245,9 +232,12 @@ def plot_cross_stock_comparison(
     matplotlib.figure.Figure
     """
     tickers  = list(stock_results.keys())
-    r2s      = [stock_results[t]["test_metrics"].r2       for t in tickers]
-    dir_accs = [stock_results[t]["test_metrics"].dir_acc  for t in tickers]
-    colors   = [SECTOR_COLORS.get(stock_results[t]["sector"], "#9E9E9E") for t in tickers]
+    r2s      = [stock_results[t]["test_metrics"].r2      for t in tickers]
+    dir_accs = [stock_results[t]["test_metrics"].dir_acc for t in tickers]
+    colors   = [
+        SECTOR_COLORS.get(stock_results[t].get("sector", ""), "#9E9E9E")
+        for t in tickers
+    ]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
 
@@ -260,21 +250,21 @@ def plot_cross_stock_comparison(
 
     avg_dir = float(np.mean(dir_accs))
     ax2.bar(tickers, dir_accs, color=colors)
-    ax2.axhline(0.5, color="red",    ls="--", alpha=0.7, label="Random (50%)")
+    ax2.axhline(0.5,     color="red",  ls="--", alpha=0.7, label="Random (50%)")
     ax2.axhline(avg_dir, color="blue", ls=":",  alpha=0.7, label=f"Avg {avg_dir:.2%}")
     ax2.set_ylabel("Directional Accuracy")
     ax2.set_title("Directional Accuracy by Stock")
-    ax2.legend()
 
-    if any(stock_results[t].get("sector") for t in tickers):
-        from matplotlib.patches import Patch
-        present_sectors = {stock_results[t]["sector"] for t in tickers}
-        handles = [
-            Patch(facecolor=SECTOR_COLORS[s], label=s)
-            for s in SECTOR_COLORS if s in present_sectors
-        ]
+    present_sectors = {stock_results[t].get("sector", "") for t in tickers}
+    handles = [
+        plt.matplotlib.patches.Patch(facecolor=SECTOR_COLORS[s], label=s)
+        for s in SECTOR_COLORS if s in present_sectors
+    ]
+    if handles:
         ax2.legend(handles=handles, title="Sector",
                    bbox_to_anchor=(1.02, 1), loc="upper left")
+    else:
+        ax2.legend()
 
     plt.suptitle("Cross-Stock Performance (LassoCV, 5-day log return)", fontsize=13)
     plt.tight_layout()
@@ -289,12 +279,8 @@ def plot_coef_heatmap(
 ) -> plt.Figure:
     """Heatmap of Lasso coefficients across all tickers.
 
-    Parameters
-    ----------
-    stock_results:
-        Output of :func:`models.train.run_all_stocks`.
-    min_tickers:
-        Only show features selected (non-zero) in at least this many tickers.
+    Only features selected (non-zero) in at least ``min_tickers`` tickers
+    are shown.
 
     Returns
     -------
@@ -304,12 +290,13 @@ def plot_coef_heatmap(
         {t: r["coef"] for t, r in stock_results.items()}
     ).T
 
-    selected = (coef_matrix != 0).sum(axis=0) >= min_tickers
+    selected  = (coef_matrix != 0).sum(axis=0) >= min_tickers
     coef_show = coef_matrix.loc[:, selected]
 
     if coef_show.empty:
         fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, "No features selected in >= 2 tickers", ha="center")
+        ax.text(0.5, 0.5, f"No features selected in ≥{min_tickers} tickers",
+                ha="center", va="center")
         return fig
 
     if figsize is None:
@@ -322,7 +309,8 @@ def plot_coef_heatmap(
         cbar_kws={"label": "Coefficient"}, ax=ax,
     )
     ax.set_title(
-        f"Lasso Coefficients Across Tickers\n(features selected in ≥{min_tickers} tickers)",
+        f"Lasso Coefficients Across Tickers\n"
+        f"(features selected in ≥{min_tickers} tickers)",
         fontsize=12,
     )
     plt.tight_layout()
@@ -330,7 +318,7 @@ def plot_coef_heatmap(
 
 
 # ---------------------------------------------------------------------------
-# Backtest plot (Cell 12)
+# Backtest
 # ---------------------------------------------------------------------------
 
 def plot_backtest(
@@ -341,7 +329,7 @@ def plot_backtest(
     transaction_cost: float = 0.001,
     figsize: tuple[int, int] = (14, 5),
 ) -> plt.Figure:
-    """Plot cumulative returns and drawdown for a long/short backtest.
+    """Cumulative returns and drawdown for a long/short backtest.
 
     Returns
     -------
@@ -356,23 +344,20 @@ def plot_backtest(
     bah_ret         = y_true
 
     cum_strategy = (np.exp(np.cumsum(strategy_ret)) - 1) * 100
-    cum_bah      = (np.exp(np.cumsum(bah_ret)) - 1) * 100
+    cum_bah      = (np.exp(np.cumsum(bah_ret))      - 1) * 100
 
     wealth   = np.exp(np.cumsum(strategy_ret))
     peak     = np.maximum.accumulate(wealth)
     drawdown = ((wealth - peak) / peak) * 100
 
-    sharpe = (
-        np.mean(strategy_ret) / (np.std(strategy_ret) + 1e-12)
-        * np.sqrt(252)
-    )
+    sharpe  = (np.mean(strategy_ret) / (np.std(strategy_ret) + 1e-12) * np.sqrt(252))
     ann_ret = float(np.sum(strategy_ret) * 252 / len(strategy_ret))
     max_dd  = float(drawdown.min())
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
-    axes[0].plot(cum_strategy, label="Strategy",     color="steelblue")
-    axes[0].plot(cum_bah,      label="Buy & Hold",   color="orange", alpha=0.7)
+    axes[0].plot(cum_strategy, label="Strategy",   color="steelblue")
+    axes[0].plot(cum_bah,      label="Buy & Hold", color="orange", alpha=0.7)
     axes[0].axhline(0, color="black", lw=0.5, ls="--")
     axes[0].set_ylabel("Cumulative Return (%)")
     axes[0].set_title(f"{model_name}: Cumulative Returns")

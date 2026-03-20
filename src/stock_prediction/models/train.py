@@ -1,17 +1,23 @@
 """
 Model construction, training, and full multi-stock pipeline.
 
-Based on adv_model_compare_v2.ipynb Cells 5, 6, 9, 11.
+Models
+------
+Linear    : OLS, RidgeCV, LassoCV, ElasticNetCV, BayesianRidge, HuberRegressor
+Tree      : Decision Tree, Random Forest, Gradient Boosting,
+            XGBoost / LightGBM / CatBoost (optional, with temporal early stopping)
+Ensembles : Voting, Stacking (TimeSeriesSplit), Blending, CV-Weighted
+Neural    : Keras dense network (optional, requires TensorFlow)
 
-Key improvements over v1:
-  - LassoCV / RidgeCV / ElasticNetCV: alpha auto-tuned via TimeSeriesSplit
-  - HuberRegressor added — robust to outlier log-return spikes
-  - Tree models regularised to prevent memorisation (max_depth ≤ 5)
-  - XGBoost / LightGBM / CatBoost use temporal inner-val for early stopping
-  - StackingRegressor explicitly uses TimeSeriesSplit (not default KFold)
-  - RobustScaler replaces StandardScaler (outlier-resistant)
-  - sklearn Pipeline for clean multi-stock processing (Cell 11)
-  - Trading backtest with Sharpe ratio and max drawdown (Cell 12)
+Key design choices
+------------------
+- RobustScaler fit on training data only
+- TimeSeriesSplit used for alpha CV and StackingRegressor
+- XGBoost / LightGBM / CatBoost validated on a temporal inner-val slice,
+  not the held-out test set
+- Ensemble weights derived from CV R², never from test-set performance
+- sklearn Pipeline for the multi-stock run (no manual scaling errors)
+- Trading backtest: long/short signals from sign(y_pred)
 """
 
 from __future__ import annotations
@@ -45,7 +51,6 @@ from sklearn.tree import DecisionTreeRegressor
 from stock_prediction.config import (
     ANNUAL_RF,
     INNER_VAL_RATIO,
-    PREDICTION_HORIZON,
     SEED,
     STOCKS,
     TRAIN_RATIO,
@@ -65,7 +70,7 @@ TS_CV = TimeSeriesSplit(n_splits=TS_CV_SPLITS)
 # ---------------------------------------------------------------------------
 
 def _clone(model: Any) -> Any:
-    """Clone model — works for sklearn, xgb, lgb, catboost."""
+    """Clone model — compatible with sklearn, xgb, lgb, and catboost."""
     try:
         return clone(model)
     except Exception:
@@ -77,22 +82,22 @@ def _clone(model: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 def build_linear_models() -> dict[str, Any]:
-    """Instantiate all linear comparison models with auto-tuned regularisation."""
+    """Instantiate linear models with auto-tuned regularisation.
+
+    Alpha is selected via TimeSeriesSplit cross-validation so no
+    future information enters the training process.
+    """
     return {
         "OLS Baseline":   LinearRegression(),
         "RidgeCV":        RidgeCV(alphas=np.logspace(-4, 4, 50), cv=TS_CV),
         "LassoCV":        LassoCV(
             alphas=np.logspace(-6, 1, 60),
-            cv=TS_CV,
-            max_iter=50_000,
-            random_state=SEED,
+            cv=TS_CV, max_iter=50_000, random_state=SEED,
         ),
         "ElasticNetCV":   ElasticNetCV(
             l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 1.0],
             alphas=np.logspace(-6, 1, 30),
-            cv=TS_CV,
-            max_iter=50_000,
-            random_state=SEED,
+            cv=TS_CV, max_iter=50_000, random_state=SEED,
         ),
         "BayesianRidge":  BayesianRidge(max_iter=500),
         "HuberRegressor": HuberRegressor(epsilon=1.35, max_iter=500, alpha=1e-4),
@@ -100,10 +105,14 @@ def build_linear_models() -> dict[str, Any]:
 
 
 def build_tree_models() -> dict[str, Any]:
-    """Instantiate regularised tree-based models."""
+    """Instantiate regularised tree-based models.
+
+    Gradient boosting libraries (XGBoost, LightGBM, CatBoost) are imported
+    lazily and omitted gracefully if not installed.
+    """
     models: dict[str, Any] = {
         "Decision Tree": DecisionTreeRegressor(
-            max_depth=5, min_samples_leaf=30, random_state=SEED
+            max_depth=5, min_samples_leaf=30, random_state=SEED,
         ),
         "Random Forest": RandomForestRegressor(
             n_estimators=300, max_depth=5, min_samples_leaf=20,
@@ -153,7 +162,7 @@ def build_tree_models() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Single-stock pipeline (AAPL-style — returns full result dict)
+# Single-stock pipeline
 # ---------------------------------------------------------------------------
 
 def train_pipeline(
@@ -169,17 +178,14 @@ def train_pipeline(
 ) -> dict[str, Any]:
     """Full train/evaluate pipeline for one ticker.
 
-    Trains linear models, tree models, and ensemble methods.
-    Uses RobustScaler and TimeSeriesSplit throughout.
-
     Parameters
     ----------
     df_raw:
-        Flat OHLCV DataFrame as returned by :func:`data.loader.download_stocks`.
+        Flat OHLCV DataFrame (Open, High, Low, Close, Volume).
     ticker:
         Ticker symbol used for feature engineering.
     train_ratio:
-        Fraction of data used for training (temporal 80/20 split).
+        Fraction of data used for training (temporal split).
     inner_val_ratio:
         Fraction of training data used as inner validation for early stopping.
     run_linear, run_tree, run_ensemble:
@@ -190,31 +196,27 @@ def train_pipeline(
     Returns
     -------
     dict with keys:
-        ``ticker``, ``feature_cols``,
+        ``ticker``, ``feature_cols``, ``scaler``,
         ``X_train``, ``X_test``, ``y_train``, ``y_test``,
         ``X_inner_train``, ``X_inner_val``, ``y_inner_train``, ``y_inner_val``,
         ``linear_results``, ``tree_results``, ``ensemble_results``,
-        ``all_results`` (combined for comparison table).
+        ``all_results``.
     """
-    # Feature engineering
     df_feat = engineer_features(df_raw, ticker)
     X, y, feature_cols = prepare_xy(df_feat)
 
-    # Temporal 80/20 split
     split_idx = int(len(X) * train_ratio)
     X_train_raw, X_test_raw = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test         = y.iloc[:split_idx], y.iloc[split_idx:]
 
-    # Inner validation split (last 10% of training period)
     inner_split = int(len(X_train_raw) * inner_val_ratio)
 
-    # Scale with RobustScaler (fit on train only)
-    scaler = RobustScaler()
+    scaler  = RobustScaler()
     X_train = pd.DataFrame(
         scaler.fit_transform(X_train_raw),
         columns=feature_cols, index=X_train_raw.index,
     )
-    X_test = pd.DataFrame(
+    X_test  = pd.DataFrame(
         scaler.transform(X_test_raw),
         columns=feature_cols, index=X_test_raw.index,
     )
@@ -228,10 +230,8 @@ def train_pipeline(
     tree_results:     dict[str, dict] = {}
     ensemble_results: dict[str, dict] = {}
 
-    # ── Linear models ─────────────────────────────────────────────────────────
     if run_linear:
-        linear_models = build_linear_models()
-        for name, model in linear_models.items():
+        for name, model in build_linear_models().items():
             try:
                 model.fit(X_train, y_train)
                 y_tr_pred = model.predict(X_train)
@@ -239,54 +239,48 @@ def train_pipeline(
                 tr_m = evaluate_model(y_train, y_tr_pred, verbose=False)
                 te_m = evaluate_model(y_test, y_te_pred, model_name=name, verbose=verbose)
                 linear_results[name] = {
-                    "model":         model,
-                    "train_metrics": tr_m,
-                    "test_metrics":  te_m,
-                    "predictions":   y_te_pred,
+                    "model":          model,
+                    "train_metrics":  tr_m,
+                    "test_metrics":   te_m,
+                    "predictions":    y_te_pred,
                 }
             except Exception as exc:
                 logger.error("[%s] %s failed: %s", ticker, name, exc)
 
-    # ── Tree models ───────────────────────────────────────────────────────────
     if run_tree:
-        tree_models = build_tree_models()
-        for name, model in tree_models.items():
+        for name, model in build_tree_models().items():
             try:
                 needs_eval = name in ("XGBoost", "LightGBM", "CatBoost")
                 if needs_eval:
                     _fit_with_early_stopping(
                         name, model,
                         X_inner_train, y_inner_train,
-                        X_inner_val, y_inner_val,
+                        X_inner_val,   y_inner_val,
                     )
                 else:
                     model.fit(X_train, y_train)
-
                 y_tr_pred = model.predict(X_train)
                 y_te_pred = model.predict(X_test)
                 tr_m = evaluate_model(y_train, y_tr_pred, verbose=False)
                 te_m = evaluate_model(y_test, y_te_pred, model_name=name, verbose=verbose)
                 tree_results[name] = {
-                    "model":         model,
-                    "train_metrics": tr_m,
-                    "test_metrics":  te_m,
-                    "predictions":   y_te_pred,
+                    "model":          model,
+                    "train_metrics":  tr_m,
+                    "test_metrics":   te_m,
+                    "predictions":    y_te_pred,
                 }
             except Exception as exc:
                 logger.error("[%s] %s failed: %s", ticker, name, exc)
 
-    # ── Ensemble methods ──────────────────────────────────────────────────────
     if run_ensemble and linear_results:
         ensemble_results = _train_ensembles(
             linear_results, tree_results,
             X_train, y_train,
-            X_test, y_test,
+            X_test,  y_test,
             verbose=verbose,
         )
 
-    all_results: dict[str, dict] = {
-        **linear_results, **tree_results, **ensemble_results
-    }
+    all_results = {**linear_results, **tree_results, **ensemble_results}
 
     return {
         "ticker":           ticker,
@@ -317,11 +311,7 @@ def _fit_with_early_stopping(
 ) -> None:
     """Fit XGBoost / LightGBM / CatBoost with temporal inner-val early stopping."""
     if name == "XGBoost":
-        model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-        )
+        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
     elif name == "LightGBM":
         import lightgbm as lgb
         model.fit(
@@ -333,48 +323,44 @@ def _fit_with_early_stopping(
             ],
         )
     elif name == "CatBoost":
-        model.fit(
-            X_tr, y_tr,
-            eval_set=(X_val, y_val),
-            use_best_model=True,
-        )
+        model.fit(X_tr, y_tr, eval_set=(X_val, y_val), use_best_model=True)
 
 
 def _train_ensembles(
     linear_results: dict,
-    tree_results: dict,
+    tree_results:   dict,
     X_train: pd.DataFrame,
     y_train: pd.Series,
-    X_test: pd.DataFrame,
-    y_test: pd.Series,
+    X_test:  pd.DataFrame,
+    y_test:  pd.Series,
     verbose: bool = True,
 ) -> dict[str, dict]:
     """Train Voting, Stacking, Blending, and CV-Weighted ensembles."""
     ensemble_results: dict[str, dict] = {}
 
-    # Build diverse base-learner list (linear + tree for variance reduction)
-    base_for_ensemble: list[tuple[str, Any]] = []
+    # Diverse base learners: one linear + one Bayesian + one tree
+    base: list[tuple[str, Any]] = []
     for cand in ("LassoCV", "BayesianRidge"):
         if cand in linear_results:
-            base_for_ensemble.append((cand.lower(), _clone(linear_results[cand]["model"])))
+            base.append((cand.lower(), _clone(linear_results[cand]["model"])))
     for cand in ("Random Forest", "LightGBM"):
         if cand in tree_results:
-            base_for_ensemble.append((cand.lower().replace(" ", "_"), _clone(tree_results[cand]["model"])))
-        if base_for_ensemble and len(base_for_ensemble) >= 3:
-            break
+            base.append((cand.lower().replace(" ", "_"), _clone(tree_results[cand]["model"])))
+            if len(base) >= 3:
+                break
 
-    if len(base_for_ensemble) < 2:
+    if len(base) < 2:
         return ensemble_results
 
     all_base = {**linear_results, **tree_results}
 
-    # A. Voting (equal weights)
+    # A. Voting — equal-weight average
     try:
-        voting = VotingRegressor(estimators=base_for_ensemble)
+        voting = VotingRegressor(estimators=base)
         voting.fit(X_train, y_train)
         y_pred = voting.predict(X_test)
         tr_m = evaluate_model(y_train, voting.predict(X_train), verbose=False)
-        te_m = evaluate_model(y_test, y_pred, model_name="Voting", verbose=verbose)
+        te_m = evaluate_model(y_test,  y_pred, model_name="Voting", verbose=verbose)
         ensemble_results["Voting"] = {
             "model": voting, "train_metrics": tr_m,
             "test_metrics": te_m, "predictions": y_pred,
@@ -382,10 +368,10 @@ def _train_ensembles(
     except Exception as exc:
         logger.error("Voting failed: %s", exc)
 
-    # B. Stacking with TimeSeriesSplit meta-learner
+    # B. Stacking — TimeSeriesSplit meta-learner
     try:
         stacking = StackingRegressor(
-            estimators=base_for_ensemble,
+            estimators=base,
             final_estimator=RidgeCV(alphas=np.logspace(-3, 3, 30), cv=TS_CV),
             cv=TS_CV,
             n_jobs=-1,
@@ -393,7 +379,7 @@ def _train_ensembles(
         stacking.fit(X_train, y_train)
         y_pred = stacking.predict(X_test)
         tr_m = evaluate_model(y_train, stacking.predict(X_train), verbose=False)
-        te_m = evaluate_model(y_test, y_pred, model_name="Stacking", verbose=verbose)
+        te_m = evaluate_model(y_test,  y_pred, model_name="Stacking", verbose=verbose)
         ensemble_results["Stacking"] = {
             "model": stacking, "train_metrics": tr_m,
             "test_metrics": te_m, "predictions": y_pred,
@@ -401,59 +387,55 @@ def _train_ensembles(
     except Exception as exc:
         logger.error("Stacking failed: %s", exc)
 
-    # C. Blending (temporal 70/30 inner split)
+    # C. Blending — temporal 70/30 inner split
     try:
-        blend_split = int(len(X_train) * 0.70)
-        X_bl_tr, X_bl_val = X_train.iloc[:blend_split], X_train.iloc[blend_split:]
-        y_bl_tr, y_bl_val = y_train.iloc[:blend_split], y_train.iloc[blend_split:]
+        bs = int(len(X_train) * 0.70)
+        X_bl_tr, X_bl_val = X_train.iloc[:bs], X_train.iloc[bs:]
+        y_bl_tr, y_bl_val = y_train.iloc[:bs], y_train.iloc[bs:]
 
-        blend_models = {n: _clone(m) for n, m in base_for_ensemble}
-        oof_preds: dict[str, np.ndarray] = {}
-        for n, m in blend_models.items():
+        blend = {n: _clone(m) for n, m in base}
+        oof: dict[str, np.ndarray] = {}
+        for n, m in blend.items():
             m.fit(X_bl_tr, y_bl_tr)
-            oof_preds[n] = m.predict(X_bl_val)
+            oof[n] = m.predict(X_bl_val)
 
-        meta_X_val = np.column_stack([oof_preds[n] for n in blend_models])
-        meta_lr = RidgeCV(alphas=np.logspace(-3, 3, 30), cv=TS_CV)
-        meta_lr.fit(meta_X_val, y_bl_val)
+        meta = RidgeCV(alphas=np.logspace(-3, 3, 30), cv=TS_CV)
+        meta.fit(np.column_stack([oof[n] for n in blend]), y_bl_val)
 
-        test_base_preds: dict[str, np.ndarray] = {}
-        for n, m in blend_models.items():
+        test_bp: dict[str, np.ndarray] = {}
+        for n, m in blend.items():
             m.fit(X_train, y_train)
-            test_base_preds[n] = m.predict(X_test)
+            test_bp[n] = m.predict(X_test)
 
-        meta_X_test = np.column_stack([test_base_preds[n] for n in blend_models])
-        y_pred = meta_lr.predict(meta_X_test)
-        tr_m = evaluate_model(y_train, y_train * 0, verbose=False)  # placeholder
-        te_m = evaluate_model(y_test, y_pred, model_name="Blending", verbose=verbose)
+        y_pred = meta.predict(np.column_stack([test_bp[n] for n in blend]))
+        tr_m   = evaluate_model(y_train, y_train * 0, verbose=False)
+        te_m   = evaluate_model(y_test,  y_pred, model_name="Blending", verbose=verbose)
         ensemble_results["Blending"] = {
-            "model": (blend_models, meta_lr), "train_metrics": tr_m,
-            "test_metrics": te_m, "predictions": y_pred,
+            "model": (blend, meta), "train_metrics": tr_m,
+            "test_metrics": te_m,  "predictions": y_pred,
         }
     except Exception as exc:
         logger.error("Blending failed: %s", exc)
 
-    # D. CV-Weighted (weights from CV R², not test-set R²)
+    # D. CV-Weighted — weights from CV R², not test-set R²
     try:
         cv_weights: dict[str, float] = {}
-        weighted_items: list[tuple[str, np.ndarray]] = []
+        items: list[tuple[str, np.ndarray]] = []
 
         for name, res in all_base.items():
             scores = cross_val_score(
                 _clone(res["model"]), X_train, y_train,
                 cv=TS_CV, scoring="r2", n_jobs=-1,
             )
-            cv_r2 = float(np.mean(np.clip(scores, 0, 1)))
-            cv_weights[name] = max(cv_r2, 0.01)
-            weighted_items.append((name, res["predictions"]))
+            cv_weights[name] = max(float(np.mean(np.clip(scores, 0, 1))), 0.01)
+            items.append((name, res["predictions"]))
 
         total_w = sum(cv_weights.values())
-        w_arr = np.array([cv_weights[n] / total_w for n, _ in weighted_items])
-        preds_mat = np.column_stack([p for _, p in weighted_items])
-        y_pred = preds_mat @ w_arr
+        w_arr   = np.array([cv_weights[n] / total_w for n, _ in items])
+        y_pred  = np.column_stack([p for _, p in items]) @ w_arr
 
-        tr_m = evaluate_model(y_train, y_train * 0, verbose=False)  # placeholder
-        te_m = evaluate_model(y_test, y_pred, model_name="CV-Weighted", verbose=verbose)
+        tr_m = evaluate_model(y_train, y_train * 0, verbose=False)
+        te_m = evaluate_model(y_test,  y_pred, model_name="CV-Weighted", verbose=verbose)
         ensemble_results["CV-Weighted"] = {
             "model": None, "train_metrics": tr_m,
             "test_metrics": te_m, "predictions": y_pred,
@@ -466,14 +448,14 @@ def _train_ensembles(
 
 
 # ---------------------------------------------------------------------------
-# Multi-stock pipeline (LassoCV via sklearn Pipeline)
+# Multi-stock pipeline
 # ---------------------------------------------------------------------------
 
 def make_lasso_pipeline() -> Pipeline:
     """sklearn Pipeline: RobustScaler + LassoCV with TimeSeriesSplit."""
     return Pipeline([
         ("scaler", RobustScaler()),
-        ("model", LassoCV(
+        ("model",  LassoCV(
             alphas=np.logspace(-6, 1, 60),
             cv=TimeSeriesSplit(n_splits=TS_CV_SPLITS),
             max_iter=50_000,
@@ -490,8 +472,8 @@ def run_all_stocks(
 ) -> dict[str, dict]:
     """Run the LassoCV pipeline across all tickers.
 
-    Uses a clean sklearn Pipeline (RobustScaler + LassoCV) so there are
-    no manual scaling errors and alpha is auto-tuned per ticker.
+    Uses a clean sklearn Pipeline (RobustScaler + LassoCV) with alpha
+    auto-tuned independently per ticker via TimeSeriesSplit.
 
     Parameters
     ----------
@@ -506,19 +488,17 @@ def run_all_stocks(
     -------
     dict[ticker, result_dict]
         Each value contains: sector, pipeline, X/y splits, predictions,
-        train/test metrics, alpha, coef.
+        train_metrics, test_metrics, alpha, coef.
     """
-    tickers = STOCKS if not stock_data else {
-        t: STOCKS.get(t, "Unknown") for t in stock_data
-    }
+    ticker_sectors = {t: STOCKS.get(t, "Unknown") for t in stock_data}
 
     all_results: dict[str, dict] = {}
 
     for ticker, df in stock_data.items():
-        sector = tickers.get(ticker, "Unknown")
+        sector = ticker_sectors[ticker]
         logger.info("Processing %s (%s)...", ticker, sector)
         try:
-            df_feat = engineer_features(df, ticker)
+            df_feat   = engineer_features(df, ticker)
             feat_cols = [c for c in df_feat.columns if c != "Target"]
             X = df_feat[feat_cols]
             y = df_feat["Target"]
@@ -551,7 +531,6 @@ def run_all_stocks(
                     pipe.named_steps["model"].coef_, index=feat_cols
                 ),
             }
-
         except Exception as exc:
             logger.error("Pipeline failed for %s: %s", ticker, exc)
 
@@ -569,22 +548,24 @@ def backtest(
     transaction_cost: float = TRANSACTION_COST,
     annual_rf: float = ANNUAL_RF,
 ) -> dict[str, float]:
-    """Simulate a long/short strategy on log-return predictions.
+    """Simulate a long/short strategy on predicted log returns.
 
-    - Long (+1) when model predicts positive log return.
-    - Short (-1) when model predicts negative log return.
-    - Deducts ``transaction_cost`` on every position change.
+    Strategy
+    --------
+    - Long  (+1) when predicted log return > 0
+    - Short (-1) when predicted log return < 0
+    - ``transaction_cost`` deducted on every position change
 
     Parameters
     ----------
     y_true_log_ret:
-        Realised log returns (test period).
+        Realised log returns over the test period.
     y_pred_log_ret:
         Predicted log returns.
     transaction_cost:
-        Round-trip cost per trade (e.g. 0.001 = 10 bps).
+        Round-trip cost per trade (default 0.001 = 10 bps).
     annual_rf:
-        Annual risk-free rate for Sharpe calculation.
+        Annual risk-free rate used in the Sharpe calculation.
 
     Returns
     -------
@@ -599,13 +580,13 @@ def backtest(
     bah_ret         = y_true
 
     cum_strategy = np.exp(np.cumsum(strategy_ret)) - 1
-    cum_bah      = np.exp(np.cumsum(bah_ret)) - 1
+    cum_bah      = np.exp(np.cumsum(bah_ret))      - 1
 
     periods_per_year = 252
-    ann_ret = float(np.sum(strategy_ret) * periods_per_year / len(strategy_ret))
-    ann_vol = float(np.std(strategy_ret) * np.sqrt(periods_per_year))
+    ann_ret    = float(np.sum(strategy_ret) * periods_per_year / len(strategy_ret))
+    ann_vol    = float(np.std(strategy_ret) * np.sqrt(periods_per_year))
     ann_rf_day = annual_rf / periods_per_year
-    sharpe = (
+    sharpe     = float(
         (np.mean(strategy_ret) - ann_rf_day) / (np.std(strategy_ret) + 1e-12)
         * np.sqrt(periods_per_year)
     )
@@ -619,7 +600,7 @@ def backtest(
     return {
         "Ann_Return": ann_ret,
         "Ann_Vol":    ann_vol,
-        "Sharpe":     float(sharpe),
+        "Sharpe":     sharpe,
         "Max_DD":     max_dd,
         "Calmar":     float(calmar),
         "Total_Ret":  float(cum_strategy[-1]),

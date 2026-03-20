@@ -1,13 +1,9 @@
 """
 Model evaluation utilities.
 
-Based on adv_model_compare_v2.ipynb Cell 4.
-
-Key improvements over v1:
-  - Metrics operate on log-return scale (not price levels)
-  - Directional accuracy includes a binomial significance test (p-value)
-  - evaluate_model returns both train & test metrics for overfitting diagnosis
-  - build_comparison_table shows Train R², Test R², and overfitting gap
+All metrics operate on the log-return scale.
+Directional accuracy is accompanied by a two-sided binomial significance
+test to quantify whether the model predicts direction better than chance.
 """
 
 from __future__ import annotations
@@ -25,16 +21,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ModelMetrics:
-    """Container for regression + directional evaluation metrics (log-return scale)."""
+    """Container for regression and directional evaluation metrics."""
 
     model_name: str
-    mse:  float
-    rmse: float
-    mae:  float
-    r2:   float
-    mape: float
-    dir_acc:   float   # directional accuracy [0, 1]
-    dir_pval:  float   # binomial p-value vs random (H0: p=0.5)
+    mse:       float
+    rmse:      float
+    mae:       float
+    r2:        float
+    mape:      float
+    dir_acc:   float   # directional accuracy in [0, 1]
+    dir_pval:  float   # two-sided binomial p-value (H0: accuracy = 0.5)
 
     @property
     def sig_stars(self) -> str:
@@ -61,9 +57,9 @@ class ModelMetrics:
 
     def __str__(self) -> str:
         lines = [
-            f"{'─' * 52}",
+            f"  {'─' * 52}",
             f"  {self.model_name}",
-            f"{'─' * 52}",
+            f"  {'─' * 52}",
             f"  RMSE : {self.rmse:.6f}  |  MAE  : {self.mae:.6f}",
             f"  R²   : {self.r2:.4f}   |  MAPE : {self.mape:.2f}%",
             f"  Dir  : {self.dir_acc:.2%}  {self.sig_stars}  (p={self.dir_pval:.4f})",
@@ -78,9 +74,7 @@ def evaluate_model(
     *,
     verbose: bool = True,
 ) -> ModelMetrics:
-    """Compute regression + directional metrics for a return-predicting model.
-
-    All metrics operate on the log-return scale.
+    """Compute regression and directional metrics for a return-predicting model.
 
     Parameters
     ----------
@@ -91,7 +85,7 @@ def evaluate_model(
     model_name:
         Label used in the printed report.
     verbose:
-        Print formatted report when True.
+        Print a formatted report when ``True``.
 
     Returns
     -------
@@ -105,11 +99,9 @@ def evaluate_model(
     mae  = float(mean_absolute_error(y_true, y_pred))
     r2   = float(r2_score(y_true, y_pred))
 
-    # MAPE: guard against near-zero log returns
     eps  = np.finfo(float).eps
     mape = float(np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + eps)) * 100)
 
-    # Directional accuracy + two-sided binomial significance test
     dir_true  = (y_true > 0).astype(int)
     dir_pred  = (y_pred > 0).astype(int)
     dir_acc   = float(np.mean(dir_true == dir_pred))
@@ -141,19 +133,19 @@ def build_comparison_table(
     Returns
     -------
     pd.DataFrame
-        Rows sorted by Test R² descending, with overfitting gap column.
+        Rows sorted by Test R² descending, including an overfitting gap column.
     """
     rows = []
     for name, (tr, te) in results.items():
         rows.append({
-            "Model":     name,
-            "Train R²":  round(tr.r2, 4),
-            "Test R²":   round(te.r2, 4),
-            "Gap":       round(tr.r2 - te.r2, 4),
-            "RMSE":      round(te.rmse, 6),
-            "MAE":       round(te.mae, 6),
-            "Dir Acc":   f"{te.dir_acc:.2%} {te.sig_stars}",
-            "_r2":       te.r2,
+            "Model":    name,
+            "Train R²": round(tr.r2, 4),
+            "Test R²":  round(te.r2, 4),
+            "Gap":      round(tr.r2 - te.r2, 4),
+            "RMSE":     round(te.rmse, 6),
+            "MAE":      round(te.mae,  6),
+            "Dir Acc":  f"{te.dir_acc:.2%} {te.sig_stars}",
+            "_r2":      te.r2,
         })
 
     df = (
@@ -162,6 +154,6 @@ def build_comparison_table(
         .drop("_r2", axis=1)
         .reset_index(drop=True)
     )
-    df.index = range(1, len(df) + 1)
+    df.index      = range(1, len(df) + 1)
     df.index.name = "Rank"
     return df
